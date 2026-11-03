@@ -128,10 +128,13 @@ class BoringViewCoordinator: ObservableObject {
             forName: Notification.Name.accessibilityAuthorizationChanged,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { notification in
             Task { @MainActor in
-                if Defaults[.hudReplacement] {
+                let granted = (notification.userInfo?["granted"] as? Bool) ?? AXIsProcessTrusted()
+                if granted && Defaults[.hudReplacement] {
                     await MediaKeyInterceptor.shared.start(promptIfNeeded: false)
+                } else if !granted {
+                    MediaKeyInterceptor.shared.stop()
                 }
             }
         }
@@ -152,8 +155,6 @@ class BoringViewCoordinator: ObservableObject {
 
                             if granted {
                                 await MediaKeyInterceptor.shared.start()
-                            } else {
-                                Defaults[.hudReplacement] = false
                             }
                         }
                     } else {
@@ -167,9 +168,7 @@ class BoringViewCoordinator: ObservableObject {
 
             if Defaults[.hudReplacement] {
                 let authorized = await XPCHelperClient.shared.isAccessibilityAuthorized()
-                if !authorized {
-                    Defaults[.hudReplacement] = false
-                } else {
+                if authorized {
                     await MediaKeyInterceptor.shared.start(promptIfNeeded: false)
                 }
             }

@@ -17,23 +17,11 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     }
 
     @objc func requestAccessibilityAuthorization() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
+        // Accessibility prompt is handled by the main application process
     }
 
     @objc func ensureAccessibilityAuthorization(_ promptIfNeeded: Bool, with reply: @escaping (Bool) -> Void) {
-        if AXIsProcessTrusted() {
-            reply(true)
-            return
-        }
-
-        if promptIfNeeded {
-            requestAccessibilityAuthorization()
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            reply(AXIsProcessTrusted())
-        }
+        reply(AXIsProcessTrusted())
     }
     
     private class KeyboardBrightnessClient {
