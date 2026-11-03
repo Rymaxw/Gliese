@@ -3,7 +3,7 @@
 A native macOS notch interface designed for fluid media control, synchronized lyrics, audio routing, and minimal desktop utilities.
 
 <p align="center">
-  <img src="gliese_icon_concept3.png" alt="Gliese Icon" width="128" height="128" />
+  <img src="Gliese/Assets.xcassets/AppIcon.appiconset/icon_512x512.png" alt="Gliese Icon" width="128" height="128" />
 </p>
 
 ---
