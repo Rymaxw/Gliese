@@ -30,10 +30,6 @@ class CalendarManager: ObservableObject {
 
     private init() {
         self.currentWeekStartDate = CalendarManager.startOfDay(Date())
-        setupEventStoreChangedObserver()
-        Task {
-            await reloadCalendarAndReminderLists()
-        }
     }
 
     deinit {

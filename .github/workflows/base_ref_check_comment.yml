@@ -1,8 +1,7 @@
 name: Fork PR target guidance
 
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize, edited, ready_for_review]
+  workflow_dispatch:
 
 permissions: {}
 

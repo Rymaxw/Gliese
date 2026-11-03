@@ -93,18 +93,27 @@ struct ShelfView: View {
                         .fontWeight(.medium)
                 }
             } else {
-                ScrollView(.horizontal) {
-                    HStack(spacing: spacing) {
-                        ForEach(tvm.items) { item in
-                            ShelfItemView(item: item)
-                                .environmentObject(quickLookService)
+                ZStack(alignment: .topTrailing) {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: spacing) {
+                            ForEach(tvm.items) { item in
+                                ShelfItemView(item: item)
+                                    .environmentObject(quickLookService)
+                            }
                         }
                     }
-                }
-                .padding(-spacing)
-                .scrollIndicators(.never)
-                .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText, .data], isTargeted: $vm.dragDetectorTargeting) { providers in
-                    handleDrop(providers: providers)
+                    .padding(-spacing)
+                    .scrollIndicators(.never)
+                    .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText, .data], isTargeted: $vm.dragDetectorTargeting) { providers in
+                        handleDrop(providers: providers)
+                    }
+
+                    Button("Clear") {
+                        tvm.clearAll()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .accessibilityLabel("Clear all shelf references")
                 }
             }
         }

@@ -6,6 +6,7 @@
 
 import Foundation
 import AppKit
+import GlieseCore
 
 @MainActor
 final class ShelfStateViewModel: ObservableObject {
@@ -31,9 +32,9 @@ final class ShelfStateViewModel: ObservableObject {
     func add(_ newItems: [ShelfItem]) {
         guard !newItems.isEmpty else { return }
         var merged = items
-        // Deduplicate by identityKey while preserving order (existing first)
         var seen: Set<String> = Set(merged.map { $0.identityKey })
         for it in newItems {
+            guard merged.count < ShelfPolicy.defaultMaxItems else { break }
             let key = it.identityKey
             if !seen.contains(key) {
                 merged.append(it)
@@ -41,6 +42,13 @@ final class ShelfStateViewModel: ObservableObject {
             }
         }
         items = merged
+    }
+
+    func clearAll() {
+        for item in items {
+            item.cleanupStoredData()
+        }
+        items.removeAll()
     }
 
     func remove(_ item: ShelfItem) {

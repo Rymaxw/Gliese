@@ -5,7 +5,7 @@ import AsyncXPCConnection
 final class XPCHelperClient: NSObject {
     nonisolated static let shared = XPCHelperClient()
     
-    private let serviceName = "theboringteam.boringnotch.BoringNotchXPCHelper"
+    private let serviceName = "com.rymaxw.gliese.XPCHelper"
     
     private var remoteService: RemoteXPCService<BoringNotchXPCHelperProtocol>?
     private var connection: NSXPCConnection?
@@ -88,6 +88,14 @@ final class XPCHelperClient: NSObject {
     nonisolated func stopMonitoringAccessibilityAuthorization() {
         monitoringTask?.cancel()
         monitoringTask = nil
+    }
+
+    @MainActor
+    func disconnect() {
+        stopMonitoringAccessibilityAuthorization()
+        connection?.invalidate()
+        connection = nil
+        remoteService = nil
     }
 
     // Expose whether the client is actively monitoring (useful for tests/debug)

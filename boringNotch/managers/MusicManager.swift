@@ -7,6 +7,7 @@
 import AppKit
 import Combine
 import Defaults
+import GlieseCore
 import SwiftUI
 
 let defaultImage: NSImage = .init(
@@ -55,6 +56,7 @@ class MusicManager: ObservableObject {
     @Published var isFavoriteTrack: Bool = false
 
     private var artworkData: Data? = nil
+    private var artworkGeneration = UUID()
 
     // Store last values at the time artwork was changed
     private var lastArtworkTitle: String = "I'm Handsome"
@@ -104,6 +106,7 @@ class MusicManager: ObservableObject {
         transitionWorkItem?.cancel()
 
         // Release active controller
+        activeController?.stop()
         activeController = nil
     }
 
@@ -112,6 +115,7 @@ class MusicManager: ObservableObject {
         // Cleanup previous controller
         if activeController != nil {
             controllerCancellables.removeAll()
+            activeController?.stop()
             activeController = nil
         }
 
@@ -152,15 +156,14 @@ class MusicManager: ObservableObject {
         let preferredType = Defaults[.mediaController]
         print("Preferred Media Controller: \(preferredType)")
 
-        // If NowPlaying is deprecated but that's the preference, use Apple Music instead
-        let controllerType = (self.isNowPlayingDeprecated && preferredType == .nowPlaying)
-            ? .appleMusic
-            : preferredType
+        let sanitizedPreference: MediaControllerType = (preferredType == .appleMusic) ? .nowPlaying : preferredType
+        let controllerType = (self.isNowPlayingDeprecated && sanitizedPreference == .nowPlaying)
+            ? .spotify
+            : sanitizedPreference
 
         if let controller = createController(for: controllerType) {
             setActiveController(controller)
-        } else if controllerType != .appleMusic, let fallbackController = createController(for: .appleMusic) {
-            // Fallback to Apple Music if preferred controller couldn't be created
+        } else if controllerType != .spotify, let fallbackController = createController(for: .spotify) {
             setActiveController(fallbackController)
         }
     }
@@ -180,7 +183,28 @@ class MusicManager: ObservableObject {
 
     // MARK: - Update Methods
     @MainActor
-    private func updateFromPlaybackState(_ state: PlaybackState) {
+    func applyExternalSourceSnapshot(_ state: PlaybackState) {
+        updateFromPlaybackState(state, fromExternalSelection: true)
+    }
+
+    @MainActor
+    private func updateFromPlaybackState(_ state: PlaybackState, fromExternalSelection: Bool = false) {
+        if !fromExternalSelection {
+            GlieseMultiSourceMediaManager.shared.ingestPlaybackState(state, isSystemNowPlaying: true)
+            if case .manual(let manualSource) = GlieseMultiSourceMediaManager.shared.mode {
+                let normalized = MediaControlPolicy.normalizeBundleIdentifier(state.bundleIdentifier)
+                let expectedBundle: String = {
+                    switch manualSource.provider {
+                    case .spotify: return MediaControlPolicy.spotifyBundleID
+                    case .brave: return MediaControlPolicy.braveBundleID
+                    case .safari: return MediaControlPolicy.safariBundleID
+                    }
+                }()
+                if normalized != expectedBundle {
+                    return
+                }
+            }
+        }
         // Check for playback state changes (playing/paused)
         if state.isPlaying != self.isPlaying {
             NSLog("Playback state changed: \(state.isPlaying ? "Playing" : "Paused")")
@@ -203,12 +227,20 @@ class MusicManager: ObservableObject {
         // Check for artwork changes
         let artworkChanged = state.artwork != nil && state.artwork != self.artworkData
         let hasContentChange = titleChanged || artistChanged || albumChanged || artworkChanged || bundleChanged
+        let trackChanged = titleChanged || artistChanged || albumChanged || bundleChanged
 
         // Handle artwork and visual transitions for changed content
         if hasContentChange {
+            artworkGeneration = UUID()
             self.triggerFlipAnimation()
 
-            if artworkChanged, let artwork = state.artwork {
+            if trackChanged {
+                let appIcon = AppIconAsNSImage(for: state.bundleIdentifier)
+                usingAppIconForArtwork = appIcon != nil
+                albumArt = appIcon ?? defaultImage
+                avgColor = .white
+            }
+            if let artwork = state.artwork {
                 self.updateArtwork(artwork)
             } else if state.artwork == nil {
                 // Try to use app icon if no artwork but track changed
@@ -219,7 +251,7 @@ class MusicManager: ObservableObject {
             }
             self.artworkData = state.artwork
 
-            if artworkChanged || state.artwork == nil {
+            if hasContentChange {
                 // Update last artwork change values
                 self.lastArtworkTitle = state.title
                 self.lastArtworkArtist = state.artist
@@ -232,8 +264,6 @@ class MusicManager: ObservableObject {
                 self.updateSneakPeek()
             }
 
-            // Fetch lyrics on content change
-            self.fetchLyricsIfAvailable(bundleIdentifier: state.bundleIdentifier, title: state.title, artist: state.artist)
         }
 
         let timeChanged = state.currentTime != self.elapsedTime
@@ -289,6 +319,12 @@ class MusicManager: ObservableObject {
         }
         
         self.timestampDate = state.lastUpdated
+        if trackChanged || durationChanged {
+            GlieseLyricsManager.shared.loadLyrics(
+                title: state.title, artist: state.artist,
+                album: state.album, duration: state.duration
+            )
+        }
     }
 
     func toggleFavoriteTrack() {
@@ -341,69 +377,6 @@ class MusicManager: ObservableObject {
     }
 
     // MARK: - Lyrics
-    private func fetchLyricsIfAvailable(bundleIdentifier: String?, title: String, artist: String) {
-        guard Defaults[.enableLyrics], !title.isEmpty else {
-            DispatchQueue.main.async {
-                self.isFetchingLyrics = false
-                self.currentLyrics = ""
-            }
-            return
-        }
-
-        // Prefer native Apple Music lyrics when available
-        if let bundleIdentifier = bundleIdentifier, bundleIdentifier.contains("com.apple.Music") {
-            Task { @MainActor in
-                let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music")
-                guard !runningApps.isEmpty else {
-                    await self.fetchLyricsFromWeb(title: title, artist: artist)
-                    return
-                }
-
-                self.isFetchingLyrics = true
-                self.currentLyrics = ""
-                do {
-                    let script = """
-                    tell application \"Music\"
-                        if it is running then
-                            if player state is playing or player state is paused then
-                                try
-                                    set l to lyrics of current track
-                                    if l is missing value then
-                                        return \"\"
-                                    else
-                                        return l
-                                    end if
-                                on error
-                                    return \"\"
-                                end try
-                            else
-                                return \"\"
-                            end if
-                        else
-                            return \"\"
-                        end if
-                    end tell
-                    """
-                    if let result = try await AppleScriptHelper.execute(script), let lyricsString = result.stringValue, !lyricsString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.currentLyrics = lyricsString.trimmingCharacters(in: .whitespacesAndNewlines)
-                        self.isFetchingLyrics = false
-                        self.syncedLyrics = []
-                        return
-                    }
-                } catch {
-                    // fall through to web lookup
-                }
-                await self.fetchLyricsFromWeb(title: title, artist: artist)
-            }
-        } else {
-            Task { @MainActor in
-                self.isFetchingLyrics = true
-                self.currentLyrics = ""
-                await self.fetchLyricsFromWeb(title: title, artist: artist)
-            }
-        }
-    }
-
     private func normalizedQuery(_ string: String) -> String {
         string
             .folding(options: .diacriticInsensitive, locale: .current)
@@ -523,13 +496,15 @@ class MusicManager: ObservableObject {
     }
 
     private func updateArtwork(_ artworkData: Data) {
+        let generation = artworkGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
             if let artworkImage = NSImage(data: artworkData) {
                 DispatchQueue.main.async { [weak self] in
-                    self?.usingAppIconForArtwork = false
-                    self?.updateAlbumArt(newAlbumArt: artworkImage)
+                    guard let self, self.artworkGeneration == generation else { return }
+                    self.usingAppIconForArtwork = false
+                    self.updateAlbumArt(newAlbumArt: artworkImage)
                 }
             }
         }
@@ -565,18 +540,18 @@ class MusicManager: ObservableObject {
 
     // MARK: - Playback Position Estimation
     public func estimatedPlaybackPosition(at date: Date = Date()) -> TimeInterval {
-        guard isPlaying else { return min(elapsedTime, songDuration) }
-
-        let timeDifference = date.timeIntervalSince(timestampDate)
-        let estimated = elapsedTime + (timeDifference * playbackRate)
-        return min(max(0, estimated), songDuration)
+        let timeDifference = isPlaying ? max(0, date.timeIntervalSince(timestampDate)) : 0
+        let estimated = max(0, elapsedTime + (timeDifference * playbackRate))
+        return songDuration > 0 ? min(estimated, songDuration) : estimated
     }
 
     func calculateAverageColor() {
+        let generation = artworkGeneration
         albumArt.averageColor { [weak self] color in
             DispatchQueue.main.async {
+                guard let self, self.artworkGeneration == generation else { return }
                 withAnimation(.smooth) {
-                    self?.avgColor = color ?? .white
+                    self.avgColor = color ?? .white
                 }
             }
         }
@@ -594,19 +569,28 @@ class MusicManager: ObservableObject {
 
     // MARK: - Public Methods for controlling playback
     func playPause() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.togglePlayPause) {
+                return
+            }
             await activeController?.togglePlay()
         }
     }
 
     func play() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.play) {
+                return
+            }
             await activeController?.play()
         }
     }
 
     func pause() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.pause) {
+                return
+            }
             await activeController?.pause()
         }
     }
@@ -624,25 +608,37 @@ class MusicManager: ObservableObject {
     }
     
     func togglePlay() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.togglePlayPause) {
+                return
+            }
             await activeController?.togglePlay()
         }
     }
 
     func nextTrack() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.nextTrack) {
+                return
+            }
             await activeController?.nextTrack()
         }
     }
 
     func previousTrack() {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.previousTrack) {
+                return
+            }
             await activeController?.previousTrack()
         }
     }
 
     func seek(to position: TimeInterval) {
-        Task {
+        Task { @MainActor in
+            if await GlieseMultiSourceMediaManager.shared.executeCommand(.seek(seconds: position)) {
+                return
+            }
             await activeController?.seek(to: position)
         }
     }
@@ -699,17 +695,7 @@ class MusicManager: ObservableObject {
               NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bundleID }) else { return }
         
         var script: String?
-        if bundleID == "com.apple.Music" {
-            script = """
-            tell application "Music"
-                if it is running then
-                    get sound volume
-                else
-                    return 50
-                end if
-            end tell
-            """
-        } else if bundleID == "com.spotify.client" {
+        if bundleID == "com.spotify.client" {
             script = """
             tell application "Spotify"
                 if it is running then

@@ -36,9 +36,6 @@ struct SettingsView: View {
                 NavigationLink(value: "Media") {
                     Label("Media", systemImage: "play.laptopcomputer")
                 }
-                NavigationLink(value: "Calendar") {
-                    Label("Calendar", systemImage: "calendar")
-                }
                 NavigationLink(value: "HUD") {
                     Label("HUDs", systemImage: "dial.medium.fill")
                 }
@@ -77,8 +74,6 @@ struct SettingsView: View {
                     Appearance()
                 case "Media":
                     Media()
-                case "Calendar":
-                    CalendarSettings()
                 case "HUD":
                     HUD()
                 case "Battery":
@@ -352,9 +347,6 @@ struct Charge: View {
     var body: some View {
         Form {
             Section {
-                Defaults.Toggle(key: .showBatteryIndicator) {
-                    Text("Show battery indicator")
-                }
                 Defaults.Toggle(key: .showPowerStatusNotifications) {
                     Text("Show power status notifications")
                 }
@@ -680,15 +672,22 @@ struct Media: View {
             Section {
                 MusicSlotConfigurationView()
                 Defaults.Toggle(key: .enableLyrics) {
-                    HStack {
-                        Text("Show lyrics below artist name")
-                        customBadge(text: "Beta")
+                    Text("Show inline lyrics below artist name")
+                }
+                Defaults.Toggle(key: .glieseAllowOnlineLyrics) {
+                    Text("Allow online lyrics lookup (LRCLIB)")
+                }
+                HStack {
+                    Text("Local .lrc folder")
+                    Spacer()
+                    Button("Open Folder") {
+                        GlieseLyricsManager.shared.revealLyricsFolder()
                     }
                 }
             } header: {
-                Text("Media controls")
-            }  footer: {
-                Text("Customize which controls appear in the music player. Volume expands when active.")
+                Text("Media controls & Lyrics")
+            } footer: {
+                Text("Local .lrc files in Application Support are always checked offline first. Online LRCLIB search only runs when explicitly enabled.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -697,12 +696,13 @@ struct Media: View {
         .navigationTitle("Media")
     }
 
-    // Only show controller options that are available on this macOS version
+    // Only show controller options that are available on this macOS version (excluding Apple Music)
     private var availableMediaControllers: [MediaControllerType] {
+        let base = MediaControllerType.allCases.filter { $0 != .appleMusic }
         if MusicManager.shared.isNowPlayingDeprecated {
-            return MediaControllerType.allCases.filter { $0 != .nowPlaying }
+            return base.filter { $0 != .nowPlaying }
         } else {
-            return MediaControllerType.allCases
+            return base
         }
     }
 }
@@ -865,12 +865,10 @@ struct About: View {
                     Text("Version info")
                 }
 
-                UpdaterSettingsView(updater: updaterController.updater)
-
                 HStack(spacing: 30) {
                     Spacer(minLength: 0)
                     Button {
-                        if let url = URL(string: "https://github.com/TheBoredTeam/boring.notch") {
+                        if let url = URL(string: "https://github.com/Rymaxw/Gliese") {
                             NSWorkspace.shared.open(url)
                         }
                     } label: {
@@ -889,7 +887,7 @@ struct About: View {
             }
             VStack(spacing: 0) {
                 Divider()
-                Text("Made with 🫶🏻 by not so boring not.people")
+                Text("Gliese personal development build")
                     .foregroundStyle(.secondary)
                     .padding(.top, 5)
                     .padding(.bottom, 7)
@@ -897,13 +895,6 @@ struct About: View {
                     .padding(.horizontal, 10)
             }
             .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .toolbar {
-            //            Button("Welcome window") {
-            //                openWindow(id: "onboarding")
-            //            }
-            //            .controlSize(.extraLarge)
-            CheckForUpdatesView(updater: updaterController.updater)
         }
         .navigationTitle("About")
     }
@@ -1377,18 +1368,8 @@ struct Appearance: View {
             }
 
             Section {
-                Defaults.Toggle(key: .showMirror) {
-                    Text("Enable boring mirror")
-                }
-                    .disabled(!checkVideoInput())
-                Picker("Mirror shape", selection: $mirrorShape) {
-                    Text("Circle")
-                        .tag(MirrorShapeEnum.circle)
-                    Text("Square")
-                        .tag(MirrorShapeEnum.rectangle)
-                }
                 Defaults.Toggle(key: .showNotHumanFace) {
-                    Text("Show cool face animation while inactive")
+                    Text("Show face animation while inactive")
                 }
             } header: {
                 HStack {
@@ -1401,10 +1382,6 @@ struct Appearance: View {
     }
 
     func checkVideoInput() -> Bool {
-        if AVCaptureDevice.default(for: .video) != nil {
-            return true
-        }
-
         return false
     }
 }

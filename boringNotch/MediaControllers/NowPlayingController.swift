@@ -16,7 +16,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Properties
     @Published private(set) var playbackState: PlaybackState = .init(
-        bundleIdentifier: "com.apple.Music"
+        bundleIdentifier: "com.spotify.client"
     )
 
     var playbackStatePublisher: AnyPublisher<PlaybackState, Never> {
@@ -25,12 +25,11 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     var supportsVolumeControl: Bool {
         let bundleID = playbackState.bundleIdentifier
-        return bundleID == "com.apple.Music" || bundleID == "com.spotify.client"
+        return bundleID == "com.spotify.client"
     }
 
     var supportsFavorite: Bool {
-        let bundleID = playbackState.bundleIdentifier
-        return bundleID == "com.apple.Music"
+        return false
     }
 
     func setFavorite(_ favorite: Bool) async {
@@ -100,13 +99,17 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     }
 
     deinit {
+        stop()
+    }
+
+    func stop() {
         streamTask?.cancel()
-        
+        streamTask = nil
+
         if let pipeHandler = self.pipeHandler {
-            Task { await pipeHandler.close()
-            }
+            Task { await pipeHandler.close() }
         }
-        
+
         if let process = self.process {
             if process.isRunning {
                 process.terminate()
@@ -167,19 +170,11 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         let volumePercentage = Int(clampedLevel * 100)
         
         let bundleID = playbackState.bundleIdentifier
-        if !bundleID.isEmpty {
-            if bundleID == "com.apple.Music" {
-                let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music")
-                if !runningApps.isEmpty {
-                    let script = "tell application \"Music\" to set sound volume to \(volumePercentage)"
-                    try? await AppleScriptHelper.executeVoid(script)
-                }
-            } else if bundleID == "com.spotify.client" {
-                let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client")
-                if !runningApps.isEmpty {
-                    let script = "tell application \"Spotify\" to set sound volume to \(volumePercentage)"
-                    try? await AppleScriptHelper.executeVoid(script)
-                }
+        if bundleID == "com.spotify.client" {
+            let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client")
+            if !runningApps.isEmpty {
+                let script = "tell application \"Spotify\" to set sound volume to \(volumePercentage)"
+                try? await AppleScriptHelper.executeVoid(script)
             }
         }
         
@@ -208,20 +203,13 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
         do {
             try process.run()
-            streamTask = Task { [weak self] in
-                await self?.processJSONStream()
+            streamTask = Task { [weak self, pipeHandler] in
+                await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+                    await self?.handleAdapterUpdate(update)
+                }
             }
         } catch {
             assertionFailure("Failed to launch mediaremote-adapter.pl: \(error)")
-        }
-    }
-
-    // MARK: - Async Stream Processing
-    private func processJSONStream() async {
-        guard let pipeHandler = self.pipeHandler else { return }
-        
-        await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
-            await self?.handleAdapterUpdate(update)
         }
     }
 
@@ -351,6 +339,8 @@ actor JSONLinesPipeHandler {
     private let pipe: Pipe
     private let fileHandle: FileHandle
     private var buffer = ""
+    private var pendingContinuation: CheckedContinuation<Data, Error>?
+    private var isClosed = false
     
     init() {
         self.pipe = Pipe()
@@ -404,23 +394,31 @@ actor JSONLinesPipeHandler {
     }
     
     private func readData() async throws -> Data {
+        if isClosed { return Data() }
         return try await withCheckedThrowingContinuation { continuation in
-            
-            fileHandle.readabilityHandler = { handle in
+            self.pendingContinuation = continuation
+            fileHandle.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 handle.readabilityHandler = nil
-                continuation.resume(returning: data)
+                Task { await self?.completeRead(with: data) }
             }
         }
     }
-    
+
+    private func completeRead(with data: Data) {
+        guard let cont = pendingContinuation else { return }
+        pendingContinuation = nil
+        cont.resume(returning: data)
+    }
+
     func close() async {
-        do {
-            fileHandle.readabilityHandler = nil
-            try fileHandle.close()
-            try pipe.fileHandleForWriting.close()
-        } catch {
-            print("Error closing pipe handler: \(error)")
+        isClosed = true
+        fileHandle.readabilityHandler = nil
+        if let cont = pendingContinuation {
+            pendingContinuation = nil
+            cont.resume(returning: Data())
         }
+        try? fileHandle.close()
+        try? pipe.fileHandleForWriting.close()
     }
 }

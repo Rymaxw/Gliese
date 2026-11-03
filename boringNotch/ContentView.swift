@@ -16,7 +16,6 @@ import SwiftUIIntrospect
 @MainActor
 struct ContentView: View {
     @EnvironmentObject var vm: BoringViewModel
-    @ObservedObject var webcamManager = WebcamManager.shared
 
     @ObservedObject var coordinator = BoringViewCoordinator.shared
     @ObservedObject var musicManager = MusicManager.shared
@@ -26,6 +25,7 @@ struct ContentView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var isHovering: Bool = false
     @State private var anyDropDebounceTask: Task<Void, Never>?
+    @State private var escapeMonitor: Any? = nil
 
     @State private var gestureProgress: CGFloat = .zero
 
@@ -165,6 +165,28 @@ struct ContentView: View {
                             withAnimation {
                                 isHovering = false
                             }
+                        }
+                        if newState == .open {
+                            if escapeMonitor == nil {
+                                escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                                    if event.keyCode == 53 {
+                                        if SharingStateManager.shared.preventNotchClose { return event }
+                                        Task { @MainActor in
+                                            self.vm.close()
+                                        }
+                                        return nil
+                                    }
+                                    return event
+                                }
+                            }
+                        } else if let monitor = escapeMonitor {
+                            NSEvent.removeMonitor(monitor)
+                            escapeMonitor = nil
+                        }
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: Notification.Name("GlieseEscapeCloseNotch"))) { _ in
+                        if vm.notchState == .open {
+                            vm.close()
                         }
                     }
                     .onChange(of: vm.isBatteryPopoverActive) {
@@ -349,6 +371,12 @@ struct ContentView: View {
                         NotchHomeView(albumArtNamespace: albumArtNamespace)
                     case .shelf:
                         ShelfView()
+                    case .mixer:
+                        GlieseMixerView()
+                    case .clipboard:
+                        GlieseClipboardView()
+                    case .system:
+                        GlieseSystemView()
                     }
                 }
                 .transition(
