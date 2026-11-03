@@ -39,9 +39,6 @@ struct SettingsView: View {
                 NavigationLink(value: "HUD") {
                     Label("HUDs", systemImage: "dial.medium.fill")
                 }
-                NavigationLink(value: "Battery") {
-                    Label("Battery", systemImage: "battery.100.bolt")
-                }
 //                NavigationLink(value: "Downloads") {
 //                    Label("Downloads", systemImage: "square.and.arrow.down")
 //                }
@@ -76,8 +73,6 @@ struct SettingsView: View {
                     Media()
                 case "HUD":
                     HUD()
-                case "Battery":
-                    Charge()
                 case "Shelf":
                     Shelf()
                 case "Shortcuts":
@@ -343,37 +338,6 @@ struct GeneralSettings: View {
     }
 }
 
-struct Charge: View {
-    var body: some View {
-        Form {
-            Section {
-                Defaults.Toggle(key: .showPowerStatusNotifications) {
-                    Text("Show power status notifications")
-                }
-            } header: {
-                Text("General")
-            }
-            Section {
-                Defaults.Toggle(key: .showBatteryPercentage) {
-                    Text("Show battery percentage")
-                }
-                Defaults.Toggle(key: .showPowerStatusIcons) {
-                    Text("Show power status icons")
-                }
-            } header: {
-                Text("Battery Information")
-            }
-        }
-        .onAppear {
-            Task { @MainActor in
-                await XPCHelperClient.shared.isAccessibilityAuthorized()
-            }
-        }
-        .accentColor(.effectiveAccent)
-        .navigationTitle("Battery")
-    }
-}
-
 //struct Downloads: View {
 //    @Default(.selectedDownloadIndicatorStyle) var selectedDownloadIndicatorStyle
 //    @Default(.selectedDownloadIconStyle) var selectedDownloadIconStyle
@@ -492,6 +456,9 @@ struct HUD: View {
                         HStack(spacing: 12) {
                             Button("Request Accessibility") {
                                 XPCHelperClient.shared.requestAccessibilityAuthorization()
+                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                    NSWorkspace.shared.open(url)
+                                }
                             }
                             .buttonStyle(.borderedProminent)
                         }

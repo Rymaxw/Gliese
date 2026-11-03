@@ -84,6 +84,9 @@ final class MediaKeyInterceptor {
                 CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             }
             CGEvent.tapEnable(tap: eventTap, enable: true)
+            print("✅ [MediaKeyInterceptor] Event tap successfully enabled")
+        } else {
+            print("⚠️ [MediaKeyInterceptor] Failed to create event tap (CGEvent.tapCreate returned nil). Accessibility permission may be missing for Gliese.app.")
         }
     }
     

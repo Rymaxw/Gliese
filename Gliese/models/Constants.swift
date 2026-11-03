@@ -138,11 +138,6 @@ extension Defaults.Keys {
         default: MusicControlButton.defaultLayout.count
     )
     
-    // MARK: Battery
-    static let showPowerStatusNotifications = Key<Bool>("showPowerStatusNotifications", default: true)
-    static let showBatteryPercentage = Key<Bool>("showBatteryPercentage", default: true)
-    static let showPowerStatusIcons = Key<Bool>("showPowerStatusIcons", default: true)
-    
     // MARK: Downloads
     static let enableDownloadListener = Key<Bool>("enableDownloadListener", default: false)
     static let enableSafariDownloads = Key<Bool>("enableSafariDownloads", default: false)
