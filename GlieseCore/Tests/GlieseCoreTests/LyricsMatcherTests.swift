@@ -70,23 +70,206 @@ struct LyricsMatcherTests {
         #expect(LyricsMatcher.evaluateCandidates(query: instQuery, candidates: [instrumentalCandidate]) == .matchedInstrumental(instrumentalCandidate))
     }
 
-    @Test("Unknown duration prevents blind auto-match and surfaces ambiguous candidates")
-    func unknownDurationReducesConfidenceToAmbiguous() {
+    @Test("Unknown duration resolves a single unambiguous exact match, but marks conflicting durations ambiguous")
+    func unknownDurationBehavior() {
         let unknownDurationQuery = LyricsQueryTrack(
             title: "Starlight",
             artist: "Muse",
             durationSeconds: nil
         )
-        let candidate = LRCLIBCandidate(
+        let candidateA = LRCLIBCandidate(
             id: 42,
             trackName: "Starlight",
             artistName: "Muse",
             durationSeconds: 240.0,
             syncedLyrics: "[00:12.00] Far away"
         )
+        let candidateB = LRCLIBCandidate(
+            id: 43,
+            trackName: "Starlight",
+            artistName: "Muse",
+            durationSeconds: 305.0,
+            syncedLyrics: "[00:18.00] Far away extended"
+        )
 
-        let decision = LyricsMatcher.evaluateCandidates(query: unknownDurationQuery, candidates: [candidate])
-        #expect(decision == .ambiguous([candidate]))
+        #expect(LyricsMatcher.evaluateCandidates(query: unknownDurationQuery, candidates: [candidateA]) == .matchedSynced(candidateA))
+        #expect(LyricsMatcher.evaluateCandidates(query: unknownDurationQuery, candidates: [candidateA, candidateB]) == .ambiguous([candidateA, candidateB]))
+    }
+
+    @Test("Duration tolerance allows <= 5s high confidence and <= 10s unambiguous YouTube Music variance")
+    func relaxedDurationTolerance() {
+        let query = LyricsQueryTrack(title: "Midnight City", artist: "M83", durationSeconds: 248.0)
+
+        let withinFive = LRCLIBCandidate(
+            id: 101,
+            trackName: "Midnight City",
+            artistName: "M83",
+            durationSeconds: 243.8,
+            syncedLyrics: "[00:10.00] Waiting in a car"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [withinFive]) == .matchedSynced(withinFive))
+
+        let withinTen = LRCLIBCandidate(
+            id: 102,
+            trackName: "Midnight City",
+            artistName: "M83",
+            durationSeconds: 240.5,
+            syncedLyrics: "[00:10.00] Waiting in a car"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [withinTen]) == .matchedSynced(withinTen))
+
+        let farOff = LRCLIBCandidate(
+            id: 103,
+            trackName: "Midnight City",
+            artistName: "M83",
+            durationSeconds: 230.0,
+            syncedLyrics: "[00:10.00] Waiting in a car"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [farOff]) == .notFound)
+    }
+
+    @Test("Diacritics fold cleanly across titles and artists")
+    func diacriticFoldingMatches() {
+        let query = LyricsQueryTrack(title: "Deja Vu", artist: "Beyonce", durationSeconds: 240.0)
+        let candidate = LRCLIBCandidate(
+            id: 201,
+            trackName: "Déjà Vu",
+            artistName: "Beyoncé",
+            durationSeconds: 240.0,
+            syncedLyrics: "[00:10.00] Bass"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [candidate]) == .matchedSynced(candidate))
+
+        let sigurQuery = LyricsQueryTrack(title: "Hoppipolla", artist: "Sigur Ros", durationSeconds: 268.0)
+        let sigurCand = LRCLIBCandidate(
+            id: 202,
+            trackName: "Hoppípolla",
+            artistName: "Sigur Rós",
+            durationSeconds: 268.0,
+            syncedLyrics: "[00:15.00] Brosandi"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: sigurQuery, candidates: [sigurCand]) == .matchedSynced(sigurCand))
+    }
+
+    @Test("Sanitizes - Topic, VEVO, multi-artist, YouTube noise, and Artist - Title without losing song title")
+    func youtubeAndTopicSanitization() {
+        #expect(LyricsMatcher.sanitizeArtist("NIKI - Topic") == "NIKI")
+        #expect(LyricsMatcher.sanitizeArtist("ArianaGrandeVEVO") == "ArianaGrande")
+        #expect(LyricsMatcher.extractPrimaryArtist("The Weeknd, Playboi Carti") == "The Weeknd")
+        #expect(LyricsMatcher.extractPrimaryArtist("Daft Punk feat. Pharrell Williams") == "Daft Punk")
+        #expect(LyricsMatcher.stripYouTubeNoise("Lowkey (Official Audio) [4K]") == "Lowkey")
+
+        let topicQuery = LyricsQueryTrack(
+            title: "Lowkey (Official Audio)",
+            artist: "NIKI - Topic",
+            durationSeconds: 171.0
+        )
+        let lowkeyCand = LRCLIBCandidate(
+            id: 301,
+            trackName: "lowkey",
+            artistName: "NIKI",
+            durationSeconds: 171.0,
+            syncedLyrics: "[00:08.00] Wizard with words"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: topicQuery, candidates: [lowkeyCand]) == .matchedSynced(lowkeyCand))
+
+        let artistTitleEmptyArtist = LyricsQueryTrack(
+            title: "NIKI - Lowkey (Official Music Video)",
+            artist: "",
+            durationSeconds: 173.0
+        )
+        let sanitizedEmpty = LyricsMatcher.sanitizeQuery(artistTitleEmptyArtist)
+        #expect(sanitizedEmpty.cleanTitle == "Lowkey")
+        #expect(sanitizedEmpty.cleanArtist == "NIKI")
+        #expect(LyricsMatcher.evaluateCandidates(query: artistTitleEmptyArtist, candidates: [lowkeyCand]) == .matchedSynced(lowkeyCand))
+
+        let genericChannelQuery = LyricsQueryTrack(
+            title: "NIKI - Lowkey (Official Video)",
+            artist: "88rising Music",
+            durationSeconds: 174.0
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: genericChannelQuery, candidates: [lowkeyCand]) == .matchedSynced(lowkeyCand))
+    }
+
+    @Test("Mix playlist albums and core titles like Live Forever do not trigger false version rejections")
+    func mixAlbumsAndLiveForeverNotFalsePositives() {
+        #expect(LyricsMatcher.extractVersionHints(title: "Live Forever", album: "Definitely Maybe").isEmpty)
+        #expect(LyricsMatcher.extractVersionHints(title: "Oasis - Live Forever", album: "My Mix").isEmpty)
+        #expect(LyricsMatcher.extractVersionHints(title: "Starboy", album: "Discover Mix").isEmpty)
+        #expect(LyricsMatcher.extractVersionHints(title: "Starboy", album: "Replay Mix").isEmpty)
+        #expect(LyricsMatcher.extractVersionHints(title: "Hooked on a Feeling", album: "Awesome Mix Vol. 1").isEmpty)
+
+        // Genuine live/remix qualifiers are still caught
+        #expect(LyricsMatcher.extractVersionHints(title: "hate that i made you love me (live from rehearsal)", album: "") == [.live])
+        #expect(LyricsMatcher.extractVersionHints(title: "One More Time (Extended Mix)", album: nil) == [.remix])
+        #expect(LyricsMatcher.extractVersionHints(title: "Everlong", album: "Live at Wembley") == [.live])
+
+        let mixPlaylistQuery = LyricsQueryTrack(
+            title: "Starboy",
+            artist: "The Weeknd",
+            album: "Discover Mix",
+            durationSeconds: 230.0
+        )
+        let studioCand = LRCLIBCandidate(
+            id: 401,
+            trackName: "Starboy",
+            artistName: "The Weeknd",
+            albumName: "Starboy",
+            durationSeconds: 230.0,
+            syncedLyrics: "[00:14.00] I'm tryna put you in the worst mood"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: mixPlaylistQuery, candidates: [studioCand]) == .matchedSynced(studioCand))
+
+        let liveForeverQuery = LyricsQueryTrack(
+            title: "Live Forever",
+            artist: "Oasis",
+            album: "Definitely Maybe",
+            durationSeconds: 276.0
+        )
+        let liveForeverCand = LRCLIBCandidate(
+            id: 402,
+            trackName: "Live Forever",
+            artistName: "Oasis",
+            albumName: "Definitely Maybe",
+            durationSeconds: 276.0,
+            syncedLyrics: "[00:20.00] Maybe I don't really wanna know"
+        )
+        #expect(LyricsMatcher.evaluateCandidates(query: liveForeverQuery, candidates: [liveForeverCand]) == .matchedSynced(liveForeverCand))
+    }
+
+    @Test("Empty stub candidates are filtered out and synced lyrics always beat plain-only candidates")
+    func emptyStubsFilteredAndSyncedPrioritized() {
+        let query = LyricsQueryTrack(title: "Blinding Lights", artist: "The Weeknd", durationSeconds: 200.0)
+
+        let emptyStubExact = LRCLIBCandidate(
+            id: 501,
+            trackName: "Blinding Lights",
+            artistName: "The Weeknd",
+            durationSeconds: 200.0,
+            instrumental: false,
+            plainLyrics: nil,
+            syncedLyrics: "   \n  "
+        )
+        let plainCloser = LRCLIBCandidate(
+            id: 502,
+            trackName: "Blinding Lights",
+            artistName: "The Weeknd",
+            durationSeconds: 200.1,
+            plainLyrics: "I've been tryna call",
+            syncedLyrics: nil
+        )
+        let syncedSlightlyOff = LRCLIBCandidate(
+            id: 503,
+            trackName: "Blinding Lights (Album Version)",
+            artistName: "The Weeknd",
+            durationSeconds: 202.2,
+            plainLyrics: "I've been tryna call",
+            syncedLyrics: "[00:27.00] I've been tryna call"
+        )
+
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [emptyStubExact, plainCloser, syncedSlightlyOff]) == .matchedSynced(syncedSlightlyOff))
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [emptyStubExact, plainCloser]) == .matchedPlain(plainCloser))
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [emptyStubExact]) == .notFound)
     }
 
     @Test("Monotonic request generation rejects stale A -> B -> A responses and revoked consent")

@@ -559,6 +559,7 @@ struct Media: View {
     @Default(.sneakPeekStyles) var sneakPeekStyles
 
     @Default(.enableLyrics) var enableLyrics
+    @Default(.glieseAllowOnlineLyrics) var allowOnlineLyrics
 
     var body: some View {
         Form {
@@ -643,6 +644,9 @@ struct Media: View {
                 }
                 Defaults.Toggle(key: .glieseAllowOnlineLyrics) {
                     Text("Allow online lyrics lookup (LRCLIB)")
+                }
+                .onChange(of: allowOnlineLyrics) { _, _ in
+                    GlieseLyricsManager.shared.reloadCurrentTrack()
                 }
                 HStack {
                     Text("Local .lrc folder")

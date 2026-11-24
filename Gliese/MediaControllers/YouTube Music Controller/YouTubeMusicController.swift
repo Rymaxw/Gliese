@@ -264,7 +264,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
             var copied = playbackState
             copied.currentTime = newPosition
             copied.lastUpdated = Date()
-            if copied != playbackState { playbackState = copied }
+            playbackState = copied
 
         case .repeatChanged:
             guard let data = message.extractData() else { return }
@@ -434,22 +434,30 @@ final class YouTubeMusicController: MediaControllerProtocol {
             newState.volume = volume / 100.0
         }
 
-        if newState != playbackState {
+        let shouldPublish = (newState != playbackState) || (newState.isPlaying && response.elapsedSeconds != nil)
+        if shouldPublish {
+            let trackChanged = newState.title != playbackState.title || newState.artist != playbackState.artist
             playbackState = newState
 
-            artworkFetchTask?.cancel()
-            artworkFetchTask = nil
+            if trackChanged || playbackState.artwork == nil {
+                artworkFetchTask?.cancel()
+                artworkFetchTask = nil
 
-            if let artworkURL = response.imageSrc,
-               let url = URL(string: artworkURL) {
-                artworkFetchTask = Task {
-                    do {
-                        let data = try await ImageService.shared.fetchImageData(from: url)
-                        await MainActor.run { [weak self] in
-                            self?.playbackState.artwork = data
-
-                        }
-                    } catch { /* ignore */ }
+                if let artworkURL = response.imageSrc,
+                   let url = URL(string: artworkURL) {
+                    let expectedTitle = newState.title
+                    let expectedArtist = newState.artist
+                    artworkFetchTask = Task {
+                        do {
+                            let data = try await ImageService.shared.fetchImageData(from: url)
+                            await MainActor.run { [weak self] in
+                                guard let self,
+                                      self.playbackState.title == expectedTitle,
+                                      self.playbackState.artist == expectedArtist else { return }
+                                self.playbackState.artwork = data
+                            }
+                        } catch { /* ignore */ }
+                    }
                 }
             }
         }

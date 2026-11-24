@@ -169,4 +169,38 @@ struct LRCParserTests {
         let file = try lines(many)
         #expect(file.lines.count == LRCParser.maxLineCount)
     }
+
+    @Test("supports [hh:mm:ss.xx], [mm:ss,xx], and [mm:ss:xx] timestamp variants")
+    func extendedTimestampVariants() throws {
+        let file = try lines("""
+        [00:12,34]comma centis
+        [01:23:45]colon centis
+        [01:02:03.45]hours with dot
+        [01:02:03,5]hours with comma
+        """)
+        #expect(abs(file.lines[0].timestampSeconds - 12.34) < 0.0001)
+        #expect(file.lines[0].text == "comma centis")
+        #expect(abs(file.lines[1].timestampSeconds - 83.45) < 0.0001)
+        #expect(file.lines[1].text == "colon centis")
+        #expect(abs(file.lines[2].timestampSeconds - 3723.45) < 0.0001)
+        #expect(file.lines[2].text == "hours with dot")
+        #expect(abs(file.lines[3].timestampSeconds - 3723.5) < 0.0001)
+        #expect(file.lines[3].text == "hours with comma")
+    }
+
+    @Test("strips enhanced LRC inline word timestamps while preserving ordinary angle brackets")
+    func stripsEnhancedWordTimestamps() throws {
+        let file = try lines("""
+        [00:12.00] <00:12.00>Hello <00:12.50>world
+        [00:15.00]<00:15.00>Hel<00:15.20>lo <00:15.50>there
+        [00:18.00] Spaced <00:18.50> words
+        [00:20.00] I <3 you <chorus>
+        """)
+        #expect(file.lines.map(\.text) == [
+            "Hello world",
+            "Hello there",
+            "Spaced words",
+            "I <3 you <chorus>"
+        ])
+    }
 }

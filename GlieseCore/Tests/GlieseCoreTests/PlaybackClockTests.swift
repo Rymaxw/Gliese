@@ -127,4 +127,31 @@ struct PlaybackClockTests {
         #expect(!clock.apply(PlaybackSnapshot(positionSeconds: 2, durationSeconds: -2, playing: false)))
         #expect(clock.generation == 2)
     }
+
+    @Test("pause-wait-resume never adds paused duration and track change resets to zero")
+    func pauseWaitResumeAndTrackReset() {
+        var fake = 50.0
+        let clock = PlaybackClock(now: { fake })
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 10.0, durationSeconds: 200.0, playing: true, rate: 1.0)))
+
+        // Advance 25s, then pause at 35s
+        fake = 75.0
+        #expect(clock.position() == 35.0)
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 35.0, durationSeconds: 200.0, playing: false, rate: 0.0)))
+
+        // Wait 120s while paused -> position stays pinned at 35s
+        fake = 195.0
+        #expect(clock.position() == 35.0)
+
+        // Resume at 35s with rate 1.0 -> 4.5s later should be 39.5s (no pause-duration leak)
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 35.0, durationSeconds: 200.0, playing: true, rate: 1.0)))
+        fake = 199.5
+        #expect(clock.position() == 39.5)
+
+        // Track change re-anchors cleanly to 0 with new duration
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 0.0, durationSeconds: 180.0, playing: true, rate: 1.0)))
+        #expect(clock.position() == 0.0)
+        fake = 202.0
+        #expect(clock.position() == 2.5)
+    }
 }

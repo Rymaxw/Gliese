@@ -28,6 +28,7 @@ class MusicManager: ObservableObject {
 
     // Active controller
     private var activeController: (any MediaControllerProtocol)?
+    private let playbackClock = PlaybackClock()
 
     // Published properties for UI
     @Published var songTitle: String = "I'm Handsome"
@@ -205,6 +206,10 @@ class MusicManager: ObservableObject {
                 }
             }
         }
+        let previousIsPlaying = self.isPlaying
+        let previousDuration = self.songDuration
+        let previousTimestampDate = self.timestampDate
+
         // Check for playback state changes (playing/paused)
         if state.isPlaying != self.isPlaying {
             NSLog("Playback state changed: \(state.isPlaying ? "Playing" : "Paused")")
@@ -272,9 +277,10 @@ class MusicManager: ObservableObject {
 
         }
 
+        let effectiveRate = state.isPlaying ? (state.playbackRate > 0 ? state.playbackRate : 1.0) : state.playbackRate
         let timeChanged = state.currentTime != self.elapsedTime
         let durationChanged = state.duration != self.songDuration
-        let playbackRateChanged = state.playbackRate != self.playbackRate
+        let playbackRateChanged = effectiveRate != self.playbackRate
         let shuffleChanged = state.isShuffled != self.isShuffled
         let repeatModeChanged = state.repeatMode != self.repeatMode
         let volumeChanged = state.volume != self.volume
@@ -300,7 +306,7 @@ class MusicManager: ObservableObject {
         }
 
         if playbackRateChanged {
-            self.playbackRate = state.playbackRate
+            self.playbackRate = effectiveRate
         }
         
         if shuffleChanged {
@@ -324,12 +330,51 @@ class MusicManager: ObservableObject {
             self.volume = state.volume
         }
         
+        let timestampChanged = state.lastUpdated != previousTimestampDate
         self.timestampDate = state.lastUpdated
-        if trackChanged || durationChanged {
+
+        let shouldReanchorClock = trackChanged
+            || timeChanged
+            || durationChanged
+            || playbackRateChanged
+            || state.isPlaying != previousIsPlaying
+            || timestampChanged
+            || playbackClock.position() == nil
+
+        if shouldReanchorClock {
+            let validDuration: Double? = state.duration > 0 ? state.duration : nil
+            if state.isPlaying {
+                let anchorLatency = (state.lastUpdated == .distantPast)
+                    ? 0.0
+                    : max(0.0, Date().timeIntervalSince(state.lastUpdated))
+                let adjusted = max(0.0, state.currentTime + anchorLatency * effectiveRate)
+                let clamped = validDuration.map { min(adjusted, $0) } ?? adjusted
+                playbackClock.apply(PlaybackSnapshot(
+                    positionSeconds: clamped,
+                    durationSeconds: validDuration,
+                    playing: true,
+                    rate: effectiveRate
+                ))
+            } else {
+                let clamped = validDuration.map { min(max(0.0, state.currentTime), $0) } ?? max(0.0, state.currentTime)
+                playbackClock.apply(PlaybackSnapshot(
+                    positionSeconds: clamped,
+                    durationSeconds: validDuration,
+                    playing: false,
+                    rate: 0.0
+                ))
+            }
+        }
+
+        let significantDurationChange = (previousDuration <= 0 && state.duration > 0)
+            || abs(state.duration - previousDuration) >= 0.5
+        if trackChanged || significantDurationChange {
             GlieseLyricsManager.shared.loadLyrics(
                 title: state.title, artist: state.artist,
                 album: state.album, duration: state.duration
             )
+        } else if state.isPlaying && !previousIsPlaying {
+            GlieseLyricsManager.shared.retryIfTransientFailure()
         }
     }
 
@@ -546,8 +591,14 @@ class MusicManager: ObservableObject {
 
     // MARK: - Playback Position Estimation
     public func estimatedPlaybackPosition(at date: Date = Date()) -> TimeInterval {
-        let timeDifference = isPlaying ? max(0, date.timeIntervalSince(timestampDate)) : 0
-        let estimated = max(0, elapsedTime + (timeDifference * playbackRate))
+        if let clockPosition = playbackClock.position() {
+            return clockPosition
+        }
+        let timeDifference = (isPlaying && timestampDate != .distantPast)
+            ? max(0, date.timeIntervalSince(timestampDate))
+            : 0
+        let effectiveRate = playbackRate > 0 ? playbackRate : 1.0
+        let estimated = max(0, elapsedTime + (timeDifference * effectiveRate))
         return songDuration > 0 ? min(estimated, songDuration) : estimated
     }
 

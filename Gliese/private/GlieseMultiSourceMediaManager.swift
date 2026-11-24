@@ -36,6 +36,8 @@ final class GlieseMultiSourceMediaManager: ObservableObject {
     private var sourceCoordinator = SourceCoordinator()
     private var pollTask: Task<Void, Never>?
     private var spotifyObserver: NSObjectProtocol?
+    private var systemNowPlayingBundleID: String? = nil
+    private var systemNowPlayingIsPlaying: Bool = false
 
     private init() {
         self.selectionSnapshot = sourceCoordinator.snapshot()
@@ -86,13 +88,19 @@ final class GlieseMultiSourceMediaManager: ObservableObject {
 
     func ingestPlaybackState(_ state: PlaybackState, isSystemNowPlaying: Bool = true) {
         let normalizedBundle = MediaControlPolicy.normalizeBundleIdentifier(state.bundleIdentifier)
-        guard let provider = provider(for: normalizedBundle) else { return }
-
         let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: normalizedBundle).first
         let pid = runningApp?.processIdentifier ?? 0
-        if isSystemNowPlaying && pid > 0 {
-            systemNowPlayingPID = pid
+        if isSystemNowPlaying {
+            if pid > 0 {
+                systemNowPlayingPID = pid
+            }
+            if !normalizedBundle.isEmpty {
+                systemNowPlayingBundleID = normalizedBundle
+                systemNowPlayingIsPlaying = state.isPlaying
+            }
         }
+
+        guard let provider = provider(for: normalizedBundle) else { return }
 
         let sourceID = SourceID(provider: provider)
         let previous = sources[provider]
@@ -300,7 +308,7 @@ final class GlieseMultiSourceMediaManager: ObservableObject {
 
         let isSystem = (spotifyPID != nil && spotifyPID == systemNowPlayingPID) || systemNowPlayingPID == nil
         ingestPlaybackState(state, isSystemNowPlaying: isSystem)
-        if selectedProvider == .spotify {
+        if shouldPushSpotifyToMusicManager(title: title, artist: artist, isPlaying: isPlaying, isSystem: isSystem, isPoll: false) {
             applySelectedSourceToMusicManager()
         }
     }
@@ -366,9 +374,44 @@ final class GlieseMultiSourceMediaManager: ObservableObject {
         ).first?.processIdentifier
         let isSystem = (spotifyPID != nil && spotifyPID == systemNowPlayingPID)
         ingestPlaybackState(state, isSystemNowPlaying: isSystem)
-        if selectedProvider == .spotify {
+        if shouldPushSpotifyToMusicManager(title: title, artist: artist, isPlaying: isPlaying, isSystem: isSystem, isPoll: true) {
             applySelectedSourceToMusicManager()
         }
+    }
+
+    private func shouldPushSpotifyToMusicManager(
+        title: String,
+        artist: String,
+        isPlaying: Bool,
+        isSystem: Bool,
+        isPoll: Bool
+    ) -> Bool {
+        if case .manual(let target) = mode {
+            return target.provider == .spotify
+        }
+        guard selectedProvider == .spotify else { return false }
+
+        // Never let background Spotify polling overwrite another actively playing source
+        // (e.g., Brave/Safari YouTube Music, Chrome, Arc, Pear Desktop, Apple Music).
+        if systemNowPlayingIsPlaying,
+           let activeBundle = systemNowPlayingBundleID,
+           activeBundle != MediaControlPolicy.spotifyBundleID {
+            return false
+        }
+
+        // When NowPlayingController is already streaming Spotify directly, skip redundant 2.5s AppleScript
+        // re-pushes that would race MediaRemote's microsecond clock and duration precision.
+        if isPoll && isSystem
+            && !MusicManager.shared.isNowPlayingDeprecated
+            && Defaults[.mediaController] == .nowPlaying
+            && MusicManager.shared.bundleIdentifier == MediaControlPolicy.spotifyBundleID
+            && MusicManager.shared.songTitle == title
+            && MusicManager.shared.artistName == artist
+            && MusicManager.shared.isPlaying == isPlaying {
+            return false
+        }
+
+        return true
     }
 
     private func checkAutomationPermission(bundleIdentifier: String) -> Bool {

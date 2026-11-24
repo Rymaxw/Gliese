@@ -119,7 +119,7 @@ class SpotifyController: MediaControllerProtocol {
             album: currentTrackAlbum,
             currentTime: currentTime,
             duration: duration,
-            playbackRate: 1,
+            playbackRate: isPlaying ? 1.0 : 0.0,
             isShuffled: isShuffled,
             repeatMode: isRepeating ? .all : .off,
             lastUpdated: Date(),
@@ -131,13 +131,14 @@ class SpotifyController: MediaControllerProtocol {
             state.artwork = existingArtwork
         }
 
-    playbackState = state
+        playbackState = state
 
         if !artworkURL.isEmpty, let url = URL(string: artworkURL) {
             guard artworkURL != lastArtworkURL || state.artwork == nil else { return }
             artworkFetchTask?.cancel()
 
-            let currentState = state
+            let expectedTitle = state.title
+            let expectedArtist = state.artist
 
             artworkFetchTask = Task {
                 do {
@@ -145,10 +146,12 @@ class SpotifyController: MediaControllerProtocol {
 
                     await MainActor.run { [weak self] in
                         guard let self = self else { return }
-                        var updatedState = currentState
-                        updatedState.artwork = data
-                        self.playbackState = updatedState
-                        self.lastArtworkURL = artworkURL
+                        if self.playbackState.title == expectedTitle && self.playbackState.artist == expectedArtist {
+                            var updatedState = self.playbackState
+                            updatedState.artwork = data
+                            self.playbackState = updatedState
+                            self.lastArtworkURL = artworkURL
+                        }
                         self.artworkFetchTask = nil
                     }
                 } catch {

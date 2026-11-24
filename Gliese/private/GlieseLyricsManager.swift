@@ -32,6 +32,39 @@ final class GlieseLyricsManager: ObservableObject {
     private let offsetsFileURL: URL
     private var savedOffsets: [String: Double] = [:]
     private var fetchTask: Task<Void, Never>?
+    private var requestTracker = LyricsRequestTracker()
+    private var lastLookupWasTransientFailure = false
+
+    private static let plainLyricsCacheTTLSeconds: TimeInterval = 24 * 3600
+
+    private enum LRCLIBLookupError: Error {
+        case offline
+        case rateLimited(retryAfterSeconds: Int?)
+        case serverError(statusCode: Int)
+        case httpError(statusCode: Int)
+
+        var isTransient: Bool {
+            switch self {
+            case .offline, .rateLimited, .serverError:
+                return true
+            case .httpError:
+                return false
+            }
+        }
+
+        var userMessage: String {
+            switch self {
+            case .offline:
+                return "LRCLIB lookup failed (offline or timed out)"
+            case .rateLimited:
+                return "LRCLIB rate-limited — will retry"
+            case .serverError:
+                return "LRCLIB temporarily unavailable"
+            case .httpError:
+                return "LRCLIB lookup failed"
+            }
+        }
+    }
 
     private init() {
         let fm = FileManager.default
@@ -58,6 +91,8 @@ final class GlieseLyricsManager: ObservableObject {
         guard !trimmedTitle.isEmpty,
               !(trimmedTitle == "I'm Handsome" && trimmedArtist == "Me") else {
             fetchTask?.cancel()
+            requestTracker.cancelActiveRequest()
+            lastLookupWasTransientFailure = false
             currentTrackKey = ""
             state = .idle
             return
@@ -70,21 +105,28 @@ final class GlieseLyricsManager: ObservableObject {
             durationSeconds: duration
         )
         let key = LyricsMatcher.cacheKey(for: query)
-        if key == currentTrackKey, state != .idle, state != .onlineConsentRequired {
+        if key == currentTrackKey, state != .idle, state != .onlineConsentRequired, !lastLookupWasTransientFailure {
             return
         }
 
         currentTrackKey = key
+        lastLookupWasTransientFailure = false
         state = .loading
         let savedOffset = savedOffsets[key] ?? 0.0
         userOffsetSeconds = savedOffset
         isFollowing = true
 
+        let generation = requestTracker.beginRequest(for: query)
         fetchTask?.cancel()
         fetchTask = Task { [weak self] in
             guard let self else { return }
-            await self.resolveLyrics(for: query, trackKey: key, initialOffset: savedOffset)
+            await self.resolveLyrics(for: query, trackKey: key, generation: generation, initialOffset: savedOffset)
         }
+    }
+
+    func retryIfTransientFailure() {
+        guard lastLookupWasTransientFailure, !currentTrackKey.isEmpty else { return }
+        reloadCurrentTrack()
     }
 
     func reloadCurrentTrack() {
@@ -170,8 +212,15 @@ final class GlieseLyricsManager: ObservableObject {
 
     // MARK: - Resolution Pipeline
 
-    private func resolveLyrics(for query: LyricsQueryTrack, trackKey: String, initialOffset: Double) async {
-        guard !Task.isCancelled, trackKey == currentTrackKey else { return }
+    private func resolveLyrics(
+        for query: LyricsQueryTrack,
+        trackKey: String,
+        generation: UInt64,
+        initialOffset: Double
+    ) async {
+        guard !Task.isCancelled,
+              generation == requestTracker.currentGeneration,
+              trackKey == currentTrackKey else { return }
         state = .loading
 
         // 1. Offline local .lrc file lookup (zero network activity)
@@ -180,10 +229,15 @@ final class GlieseLyricsManager: ObservableObject {
             return
         }
 
-        // 2. Local cached LRCLIB response (zero network activity)
+        // 2. Local cached LRCLIB response (zero network activity).
+        //    Plain-only cached entries expire after 24h (or when missing cachedAt) so they can upgrade to synced lyrics.
+        var stalePlainFallback: LRCLIBCandidate?
         if let cached = loadCachedEntry(forKey: trackKey) {
-            applyCandidate(cached, sourceLabel: "Cached LRCLIB", initialOffset: initialOffset)
-            return
+            if !cached.isStalePlain || !Defaults[.glieseAllowOnlineLyrics] {
+                applyCandidate(cached.candidate, sourceLabel: "Cached LRCLIB", initialOffset: initialOffset)
+                return
+            }
+            stalePlainFallback = cached.candidate
         }
 
         // 3. Online LRCLIB lookup — strictly gated on user opt-in (A08)
@@ -195,21 +249,63 @@ final class GlieseLyricsManager: ObservableObject {
         guard !Task.isCancelled else { return }
 
         do {
-            let candidates = try await fetchLRCLIBCandidates(query: query)
-            guard !Task.isCancelled else { return }
+            let decision = try await searchAndMatchLRCLIB(query: query, generation: generation)
+            guard !Task.isCancelled,
+                  requestTracker.shouldAcceptResponse(
+                      generation: generation,
+                      for: query,
+                      onlineConsentGranted: Defaults[.glieseAllowOnlineLyrics]
+                  ) else {
+                if !Defaults[.glieseAllowOnlineLyrics], generation == requestTracker.currentGeneration {
+                    state = .onlineConsentRequired
+                }
+                return
+            }
 
-            let decision = LyricsMatcher.selectBestMatch(query: query, candidates: candidates)
             switch decision {
             case .matched(let best, _):
+                lastLookupWasTransientFailure = false
                 saveCachedEntry(best, forKey: trackKey)
                 applyCandidate(best, sourceLabel: "LRCLIB", initialOffset: initialOffset)
             case .rejected(let reason):
-                state = .notFound(reason: humanizeRejection(reason))
+                lastLookupWasTransientFailure = false
+                if let fallback = stalePlainFallback {
+                    saveCachedEntry(fallback, forKey: trackKey)
+                    applyCandidate(fallback, sourceLabel: "Cached LRCLIB", initialOffset: initialOffset)
+                } else {
+                    state = .notFound(reason: humanizeRejection(reason))
+                }
+            }
+        } catch let lookupError as LRCLIBLookupError {
+            guard !Task.isCancelled,
+                  generation == requestTracker.currentGeneration,
+                  trackKey == currentTrackKey else { return }
+            lastLookupWasTransientFailure = lookupError.isTransient
+            if let fallback = stalePlainFallback {
+                applyCandidate(fallback, sourceLabel: "Cached LRCLIB", initialOffset: initialOffset)
+            } else {
+                state = .notFound(reason: lookupError.userMessage)
             }
         } catch {
-            guard !Task.isCancelled else { return }
-            state = .notFound(reason: "LRCLIB lookup failed")
+            guard !Task.isCancelled,
+                  generation == requestTracker.currentGeneration,
+                  trackKey == currentTrackKey else { return }
+            lastLookupWasTransientFailure = true
+            if let fallback = stalePlainFallback {
+                applyCandidate(fallback, sourceLabel: "Cached LRCLIB", initialOffset: initialOffset)
+            } else {
+                state = .notFound(reason: "LRCLIB lookup failed")
+            }
         }
+    }
+
+    private func applyTimedLRC(_ lrcFile: LRCFile, sourceLabel: String, initialOffset: Double) {
+        let timeline = LyricsTimeline(file: lrcFile, userOffsetSeconds: initialOffset)
+        userOffsetSeconds = timeline.userOffsetSeconds
+        isFollowing = timeline.isFollowing
+        state = .synced(timeline, sourceLabel: sourceLabel)
+        MusicManager.shared.syncedLyrics = lrcFile.linesWithFileOffsetApplied().map { ($0.timestampSeconds, $0.text) }
+        MusicManager.shared.currentLyrics = lrcFile.lines.map { $0.text }.joined(separator: "\n")
     }
 
     private func applyParsedLyrics(raw: String, sourceLabel: String, initialOffset: Double) {
@@ -219,12 +315,7 @@ final class GlieseLyricsManager: ObservableObject {
         }
         switch outcome {
         case .timed(let lrcFile):
-            let timeline = LyricsTimeline(file: lrcFile, userOffsetSeconds: initialOffset)
-            userOffsetSeconds = timeline.userOffsetSeconds
-            isFollowing = timeline.isFollowing
-            state = .synced(timeline, sourceLabel: sourceLabel)
-            MusicManager.shared.syncedLyrics = lrcFile.linesWithFileOffsetApplied().map { ($0.timestampSeconds, $0.text) }
-            MusicManager.shared.currentLyrics = lrcFile.lines.map { $0.text }.joined(separator: "\n")
+            applyTimedLRC(lrcFile, sourceLabel: sourceLabel, initialOffset: initialOffset)
         case .untimed(let text, _):
             state = .plainText(text, sourceLabel: sourceLabel)
             MusicManager.shared.syncedLyrics = []
@@ -242,8 +333,23 @@ final class GlieseLyricsManager: ObservableObject {
             return
         }
         if let synced = candidate.syncedLyrics, !synced.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            applyParsedLyrics(raw: synced, sourceLabel: sourceLabel, initialOffset: initialOffset)
-            return
+            if let outcome = try? LRCParser.parse(synced) {
+                switch outcome {
+                case .timed(let lrcFile):
+                    applyTimedLRC(lrcFile, sourceLabel: sourceLabel, initialOffset: initialOffset)
+                    return
+                case .untimed(let text, _):
+                    if candidate.plainLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                        state = .plainText(text, sourceLabel: sourceLabel)
+                        MusicManager.shared.syncedLyrics = []
+                        MusicManager.shared.currentLyrics = text
+                        return
+                    }
+                case .empty:
+                    break
+                }
+            }
+            // Fall through to plainLyrics if syncedLyrics was malformed or parsed empty.
         }
         if let plain = candidate.plainLyrics, !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             state = .plainText(plain, sourceLabel: sourceLabel)
@@ -301,14 +407,79 @@ final class GlieseLyricsManager: ObservableObject {
         let instrumental: Bool?
         let plainLyrics: String?
         let syncedLyrics: String?
+        let cachedAt: TimeInterval?
     }
 
-    private func fetchLRCLIBCandidates(query: LyricsQueryTrack) async throws -> [LRCLIBCandidate] {
+    private func searchAndMatchLRCLIB(query: LyricsQueryTrack, generation: UInt64) async throws -> LyricsMatchDecision {
+        let sanitized = LyricsMatcher.sanitizeQuery(query)
+        var searchSteps: [[URLQueryItem]] = []
+        var seenSignatures = Set<String>()
+
+        func appendStep(_ items: [URLQueryItem]) {
+            let signature = items.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&").lowercased()
+            if !signature.isEmpty && seenSignatures.insert(signature).inserted {
+                searchSteps.append(items)
+            }
+        }
+
+        // Step 1: Cleaned title + cleaned artist (handles "- Topic", "VEVO", "(Official Audio)", "Artist - Title")
+        if !sanitized.cleanTitle.isEmpty {
+            if !sanitized.cleanArtist.isEmpty {
+                appendStep([
+                    URLQueryItem(name: "track_name", value: sanitized.cleanTitle),
+                    URLQueryItem(name: "artist_name", value: sanitized.cleanArtist),
+                ])
+            }
+            if let inferred = sanitized.inferredArtist, !inferred.isEmpty, inferred.lowercased() != sanitized.cleanArtist.lowercased() {
+                appendStep([
+                    URLQueryItem(name: "track_name", value: sanitized.cleanTitle),
+                    URLQueryItem(name: "artist_name", value: inferred),
+                ])
+            }
+        }
+
+        // Step 2: Stripped title + primary artist (handles multi-artist commas, "(feat. ...)", "- Remastered")
+        let fallbackArtist = sanitized.inferredArtist ?? sanitized.primaryArtist
+        if !sanitized.strippedTitle.isEmpty && !fallbackArtist.isEmpty {
+            appendStep([
+                URLQueryItem(name: "track_name", value: sanitized.strippedTitle),
+                URLQueryItem(name: "artist_name", value: fallbackArtist),
+            ])
+        }
+
+        // Step 3: Free-text q= fallback (handles diacritics, channel names, and minor metadata mismatches)
+        let qParts = [sanitized.strippedTitle, fallbackArtist].filter { !$0.isEmpty }
+        if !qParts.isEmpty {
+            appendStep([URLQueryItem(name: "q", value: qParts.joined(separator: " "))])
+        }
+
+        var lastRejection: LyricsMatchDecision.RejectionReason = .noCandidates
+        for items in searchSteps {
+            guard !Task.isCancelled,
+                  requestTracker.shouldAcceptResponse(
+                      generation: generation,
+                      for: query,
+                      onlineConsentGranted: Defaults[.glieseAllowOnlineLyrics]
+                  ) else {
+                return .rejected(.noCandidates)
+            }
+            let candidates = try await fetchLRCLIBCandidates(queryItems: items)
+            let decision = LyricsMatcher.selectBestMatch(query: query, candidates: candidates)
+            switch decision {
+            case .matched:
+                return decision
+            case .rejected(let reason):
+                if !candidates.isEmpty || lastRejection == .noCandidates {
+                    lastRejection = reason
+                }
+            }
+        }
+        return .rejected(lastRejection)
+    }
+
+    private func fetchLRCLIBCandidates(queryItems: [URLQueryItem]) async throws -> [LRCLIBCandidate] {
         var components = URLComponents(string: "https://lrclib.net/api/search")!
-        components.queryItems = [
-            URLQueryItem(name: "track_name", value: query.title),
-            URLQueryItem(name: "artist_name", value: query.artist),
-        ]
+        components.queryItems = queryItems
         guard let url = components.url else { return [] }
 
         var request = URLRequest(url: url)
@@ -316,9 +487,29 @@ final class GlieseLyricsManager: ObservableObject {
         request.setValue("Gliese/1.0 (https://github.com/Rymaxw/Gliese)", forHTTPHeaderField: "User-Agent")
 
         onlineLookupCount += 1
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            return []
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch let urlError as URLError {
+            if urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            throw LRCLIBLookupError.offline
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw LRCLIBLookupError.offline
+        }
+        if http.statusCode == 429 {
+            let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)
+            throw LRCLIBLookupError.rateLimited(retryAfterSeconds: retryAfter)
+        }
+        if (500...599).contains(http.statusCode) {
+            throw LRCLIBLookupError.serverError(statusCode: http.statusCode)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw LRCLIBLookupError.httpError(statusCode: http.statusCode)
         }
 
         let wireItems = try JSONDecoder().decode([LRCLIBWireDTO].self, from: data)
@@ -341,13 +532,13 @@ final class GlieseLyricsManager: ObservableObject {
         return cacheDirectoryURL.appendingPathComponent("\(digest).json")
     }
 
-    private func loadCachedEntry(forKey key: String) -> LRCLIBCandidate? {
+    private func loadCachedEntry(forKey key: String) -> (candidate: LRCLIBCandidate, isStalePlain: Bool)? {
         let url = cacheFileURL(forKey: key)
         guard let data = try? Data(contentsOf: url),
               let dto = try? JSONDecoder().decode(LRCLIBWireDTO.self, from: data) else {
             return nil
         }
-        return LRCLIBCandidate(
+        let candidate = LRCLIBCandidate(
             id: dto.id ?? 0,
             trackName: dto.trackName ?? "",
             artistName: dto.artistName ?? "",
@@ -357,6 +548,20 @@ final class GlieseLyricsManager: ObservableObject {
             plainLyrics: dto.plainLyrics,
             syncedLyrics: dto.syncedLyrics
         )
+        let hasSynced = !(candidate.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let isPlainOnly = !candidate.instrumental && !hasSynced
+        let isStalePlain: Bool
+        if isPlainOnly {
+            if let cachedAt = dto.cachedAt {
+                isStalePlain = (Date().timeIntervalSince1970 - cachedAt) > Self.plainLyricsCacheTTLSeconds
+            } else {
+                // Legacy plain-only entry written before TTL/scoring fixes: allow upgrading to synced once online.
+                isStalePlain = true
+            }
+        } else {
+            isStalePlain = false
+        }
+        return (candidate, isStalePlain)
     }
 
     private func saveCachedEntry(_ candidate: LRCLIBCandidate, forKey key: String) {
@@ -368,7 +573,8 @@ final class GlieseLyricsManager: ObservableObject {
             duration: candidate.duration,
             instrumental: candidate.instrumental,
             plainLyrics: candidate.plainLyrics,
-            syncedLyrics: candidate.syncedLyrics
+            syncedLyrics: candidate.syncedLyrics,
+            cachedAt: Date().timeIntervalSince1970
         )
         if let data = try? JSONEncoder().encode(dto) {
             try? data.write(to: cacheFileURL(forKey: key), options: .atomic)
@@ -471,7 +677,7 @@ struct GlieseInlineLyricsView: View {
             text = active.map { $0.line.text.isEmpty ? "♪" : $0.line.text } ?? "♪"
         case .loading: text = "Loading lyrics…"
         case .idle: text = "No active track"
-        case .onlineConsentRequired: text = "Lyrics unavailable"
+        case .onlineConsentRequired: text = "Online lyrics off"
         case .plainText: text = "Unsynced lyrics"
         case .instrumental: text = "Instrumental"
         case .notFound: text = "Lyrics unavailable"

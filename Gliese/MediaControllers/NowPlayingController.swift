@@ -193,7 +193,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         }
         
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
-        process.arguments = [scriptURL.path, frameworkPath, "stream"]
+        process.arguments = [scriptURL.path, frameworkPath, "stream", "--micros"]
         
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()
@@ -215,43 +215,83 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Update Methods
     private func handleAdapterUpdate(_ update: NowPlayingUpdate) async {
+        let now = Date()
+        let prev = self.playbackState
         let payload = update.payload
         let diff = update.diff ?? false
 
-        var newPlaybackState = PlaybackState(bundleIdentifier: playbackState.bundleIdentifier)
-        
-        newPlaybackState.title = payload.title ?? (diff ? self.playbackState.title : "")
-        newPlaybackState.artist = payload.artist ?? (diff ? self.playbackState.artist : "")
-        newPlaybackState.album = payload.album ?? (diff ? self.playbackState.album : "")
-        newPlaybackState.duration = payload.duration ?? (diff ? self.playbackState.duration : 0)
-        
-        if let elapsedTime = payload.elapsedTime {
-            newPlaybackState.currentTime = elapsedTime
+        let resolvedDuration: Double? = payload.durationMicros.map { $0 / 1_000_000.0 } ?? payload.duration
+        let resolvedElapsed: Double? = payload.elapsedTimeMicros.map { $0 / 1_000_000.0 } ?? payload.elapsedTime
+        let resolvedTimestamp: Date? = {
+            if let micros = payload.timestampEpochMicros {
+                return Date(timeIntervalSince1970: micros / 1_000_000.0)
+            }
+            if let dateString = payload.timestamp {
+                let fractional = ISO8601DateFormatter()
+                fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let d = fractional.date(from: dateString) {
+                    return d
+                }
+                return ISO8601DateFormatter().date(from: dateString)
+            }
+            return nil
+        }()
+
+        var newPlaybackState = PlaybackState(bundleIdentifier: prev.bundleIdentifier)
+
+        newPlaybackState.title = payload.title ?? (diff ? prev.title : "")
+        newPlaybackState.artist = payload.artist ?? (diff ? prev.artist : "")
+        newPlaybackState.album = payload.album ?? (diff ? prev.album : "")
+        newPlaybackState.duration = max(0, resolvedDuration ?? (diff ? prev.duration : 0))
+
+        let trackMetadataChanged = diff && (
+            (payload.title != nil && payload.title != prev.title) ||
+            (payload.artist != nil && payload.artist != prev.artist)
+        )
+
+        let newIsPlaying = payload.playing ?? (diff ? prev.isPlaying : false)
+        var newPlaybackRate = payload.playbackRate ?? (diff ? prev.playbackRate : 1.0)
+        if newIsPlaying && newPlaybackRate <= 0 {
+            newPlaybackRate = 1.0
+        }
+        newPlaybackState.isPlaying = newIsPlaying
+        newPlaybackState.playbackRate = newPlaybackRate
+
+        let hasValidPrevAnchor = prev.lastUpdated != .distantPast
+        var advancedOnPause = false
+
+        if let elapsedTime = resolvedElapsed {
+            newPlaybackState.currentTime = max(0, elapsedTime)
+        } else if trackMetadataChanged {
+            // Never inherit the previous track's position when a diff switches tracks without an explicit elapsedTime.
+            newPlaybackState.currentTime = 0
         } else if diff {
-            if payload.playing == false {
-                let timeSinceLastUpdate = Date().timeIntervalSince(self.playbackState.lastUpdated)
-                newPlaybackState.currentTime = self.playbackState.currentTime + (self.playbackState.playbackRate * timeSinceLastUpdate)
+            if payload.playing == false && prev.isPlaying && hasValidPrevAnchor {
+                let timeSinceLastUpdate = max(0, now.timeIntervalSince(prev.lastUpdated))
+                let effectivePrevRate = prev.playbackRate > 0 ? prev.playbackRate : 1.0
+                let computed = prev.currentTime + (effectivePrevRate * timeSinceLastUpdate)
+                newPlaybackState.currentTime = newPlaybackState.duration > 0 ? min(computed, newPlaybackState.duration) : computed
+                advancedOnPause = true
             } else {
-                newPlaybackState.currentTime = self.playbackState.currentTime
+                newPlaybackState.currentTime = prev.currentTime
             }
         } else {
             newPlaybackState.currentTime = 0
         }
 
-        
         if let shuffleMode = payload.shuffleMode {
             newPlaybackState.isShuffled = shuffleMode != 1
         } else if !diff {
             newPlaybackState.isShuffled = false
         } else {
-            newPlaybackState.isShuffled = self.playbackState.isShuffled
+            newPlaybackState.isShuffled = prev.isShuffled
         }
         if let repeatModeValue = payload.repeatMode {
             newPlaybackState.repeatMode = RepeatMode(rawValue: repeatModeValue) ?? .off
         } else if !diff {
             newPlaybackState.repeatMode = .off
         } else {
-            newPlaybackState.repeatMode = self.playbackState.repeatMode
+            newPlaybackState.repeatMode = prev.repeatMode
         }
 
         if let artworkDataString = payload.artworkData {
@@ -262,27 +302,31 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.artwork = nil
         }
 
-        if let dateString = payload.timestamp,
-           let date = ISO8601DateFormatter().date(from: dateString) {
-            newPlaybackState.lastUpdated = date
-        } else if !diff {
-            newPlaybackState.lastUpdated = Date()
+        if let ts = resolvedTimestamp {
+            if advancedOnPause && ts <= prev.lastUpdated {
+                newPlaybackState.lastUpdated = now
+            } else {
+                newPlaybackState.lastUpdated = ts
+            }
+        } else if !diff || resolvedElapsed != nil || trackMetadataChanged || advancedOnPause || !hasValidPrevAnchor {
+            newPlaybackState.lastUpdated = now
+        } else if payload.playing == true && !prev.isPlaying {
+            // Re-anchor on resume so paused wall-clock duration is never added to playback position.
+            newPlaybackState.lastUpdated = now
         } else {
-            newPlaybackState.lastUpdated = self.playbackState.lastUpdated
+            newPlaybackState.lastUpdated = prev.lastUpdated
         }
 
-        newPlaybackState.playbackRate = payload.playbackRate ?? (diff ? self.playbackState.playbackRate : 1.0)
-        newPlaybackState.isPlaying = payload.playing ?? (diff ? self.playbackState.isPlaying : false)
         newPlaybackState.bundleIdentifier = (
             payload.parentApplicationBundleIdentifier ??
             payload.bundleIdentifier ??
-            (diff ? self.playbackState.bundleIdentifier : "")
+            (diff ? prev.bundleIdentifier : "")
         )
-        
-        newPlaybackState.volume = payload.volume ?? (diff ? self.playbackState.volume : 0.5)
-        
+
+        newPlaybackState.volume = payload.volume ?? (diff ? prev.volume : 0.5)
+
         self.playbackState = newPlaybackState
-        
+
         // Fetch favorite state for supported apps asynchronously
         // await fetchFavoriteStateIfSupported()
     }
@@ -323,11 +367,14 @@ struct NowPlayingPayload: Codable {
     let artist: String?
     let album: String?
     let duration: Double?
+    let durationMicros: Double?
     let elapsedTime: Double?
+    let elapsedTimeMicros: Double?
     let shuffleMode: Int?
     let repeatMode: Int?
     let artworkData: String?
     let timestamp: String?
+    let timestampEpochMicros: Double?
     let playbackRate: Double?
     let playing: Bool?
     let parentApplicationBundleIdentifier: String?
