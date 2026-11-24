@@ -193,5 +193,6 @@ extension Defaults.Keys {
     }
 
     static let glieseAllowOnlineLyrics = Key<Bool>("glieseAllowOnlineLyrics", default: false)
+    static let glieseGlobalLyricsOffsetSeconds = Key<Double>("glieseGlobalLyricsOffsetSeconds", default: 0.0)
     static let didClearLegacyURLCacheV1 = Key<Bool>("didClearLegacyURLCache_v1", default: false)
 }

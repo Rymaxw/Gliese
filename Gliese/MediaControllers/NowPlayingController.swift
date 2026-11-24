@@ -250,13 +250,24 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         )
 
         let newIsPlaying = payload.playing ?? (diff ? prev.isPlaying : false)
-        var newPlaybackRate = payload.playbackRate ?? (diff ? prev.playbackRate : 1.0)
-        if newIsPlaying && newPlaybackRate <= 0 {
-            newPlaybackRate = 1.0
+        let newPlaybackRate: Double
+        if let explicitRate = payload.playbackRate {
+            // Respect explicit 0.0 (Chromium/Brave buffering/stalled) — do not advance elapsed time while buffering.
+            newPlaybackRate = max(0.0, explicitRate)
+        } else if diff {
+            if payload.playing == true && prev.playbackRate <= 0 {
+                // Resume-from-pause diff that omitted playbackRate: restore normal playback speed.
+                newPlaybackRate = 1.0
+            } else {
+                newPlaybackRate = prev.playbackRate
+            }
+        } else {
+            newPlaybackRate = newIsPlaying ? 1.0 : 0.0
         }
         newPlaybackState.isPlaying = newIsPlaying
         newPlaybackState.playbackRate = newPlaybackRate
 
+        let resumedFromBufferOrPause = (newIsPlaying && newPlaybackRate > 0) && (!prev.isPlaying || prev.playbackRate <= 0)
         let hasValidPrevAnchor = prev.lastUpdated != .distantPast
         var advancedOnPause = false
 
@@ -266,10 +277,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             // Never inherit the previous track's position when a diff switches tracks without an explicit elapsedTime.
             newPlaybackState.currentTime = 0
         } else if diff {
-            if payload.playing == false && prev.isPlaying && hasValidPrevAnchor {
+            if payload.playing == false && prev.isPlaying && prev.playbackRate > 0 && hasValidPrevAnchor {
                 let timeSinceLastUpdate = max(0, now.timeIntervalSince(prev.lastUpdated))
-                let effectivePrevRate = prev.playbackRate > 0 ? prev.playbackRate : 1.0
-                let computed = prev.currentTime + (effectivePrevRate * timeSinceLastUpdate)
+                let computed = prev.currentTime + (prev.playbackRate * timeSinceLastUpdate)
                 newPlaybackState.currentTime = newPlaybackState.duration > 0 ? min(computed, newPlaybackState.duration) : computed
                 advancedOnPause = true
             } else {
@@ -302,16 +312,20 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.artwork = nil
         }
 
-        if let ts = resolvedTimestamp {
-            if advancedOnPause && ts <= prev.lastUpdated {
+        if trackMetadataChanged && resolvedElapsed == nil {
+            // Track switched without explicit elapsedTime: anchor to `now` (ignore stale timestamps from previous track).
+            if let ts = resolvedTimestamp, ts > prev.lastUpdated, abs(now.timeIntervalSince(ts)) < 1.0 {
+                newPlaybackState.lastUpdated = ts
+            } else {
+                newPlaybackState.lastUpdated = now
+            }
+        } else if let ts = resolvedTimestamp {
+            if (advancedOnPause || resumedFromBufferOrPause) && ts <= prev.lastUpdated {
                 newPlaybackState.lastUpdated = now
             } else {
                 newPlaybackState.lastUpdated = ts
             }
-        } else if !diff || resolvedElapsed != nil || trackMetadataChanged || advancedOnPause || !hasValidPrevAnchor {
-            newPlaybackState.lastUpdated = now
-        } else if payload.playing == true && !prev.isPlaying {
-            // Re-anchor on resume so paused wall-clock duration is never added to playback position.
+        } else if !diff || resolvedElapsed != nil || advancedOnPause || resumedFromBufferOrPause || !hasValidPrevAnchor {
             newPlaybackState.lastUpdated = now
         } else {
             newPlaybackState.lastUpdated = prev.lastUpdated

@@ -154,4 +154,26 @@ struct PlaybackClockTests {
         fake = 202.0
         #expect(clock.position() == 2.5)
     }
+
+    @Test("buffering (playing=true, rate=0.0) holds position until rate transitions to > 0")
+    func bufferingZeroRateFreezesUntilReady() {
+        var fake = 10.0
+        let clock = PlaybackClock(now: { fake })
+
+        // Track begins buffering at 0.0 with playing=true, explicit rate=0.0
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 0.0, durationSeconds: 201.0, playing: true, rate: 0.0)))
+        #expect(clock.position() == 0.0)
+
+        // 1.5s of network buffering passes -> position must stay pinned at 0.0 (no early head-start)
+        fake = 11.5
+        #expect(clock.position() == 0.0)
+
+        // Buffering finishes and audio actually starts (rate transitions 0.0 -> 1.0 at position 0.0)
+        #expect(clock.apply(PlaybackSnapshot(positionSeconds: 0.0, durationSeconds: 201.0, playing: true, rate: 1.0)))
+        #expect(clock.position() == 0.0)
+
+        // 15.1s of actual playback passes -> position is exactly 15.1s (not 16.6s!)
+        fake = 26.6
+        #expect(abs((clock.position() ?? -1) - 15.1) < 0.0001)
+    }
 }

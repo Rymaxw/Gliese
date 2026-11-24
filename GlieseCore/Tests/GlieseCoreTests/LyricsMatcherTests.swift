@@ -272,6 +272,58 @@ struct LyricsMatcherTests {
         #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [emptyStubExact]) == .notFound)
     }
 
+    @Test("Genuine timed LRC beats lower-ID poisoned fake-synced candidate (Berubah - Tenxi & Jemsii repro)")
+    func genuineTimedBeatsFakeSyncedCandidate() {
+        let query = LyricsQueryTrack(
+            title: "Berubah",
+            artist: "Tenxi & Jemsii",
+            album: "",
+            durationSeconds: 200.501
+        )
+        let untimedBody = "Jangan nyesel semua problem kamu yang start\nJangan minta rewind aku kamu udah finish"
+        let fakeSyncedLowerID = LRCLIBCandidate(
+            id: 24620315,
+            trackName: "Berubah",
+            artistName: "Tenxi, Jemsii",
+            albumName: "null",
+            durationSeconds: 201.0,
+            plainLyrics: untimedBody,
+            syncedLyrics: untimedBody
+        )
+        let realSyncedHigherID = LRCLIBCandidate(
+            id: 38624267,
+            trackName: "Berubah",
+            artistName: "Tenxi, Jemsii",
+            albumName: "REBEL HEART - Single",
+            durationSeconds: 201.0,
+            plainLyrics: untimedBody,
+            syncedLyrics: "[00:15.10]Jangan nyesel semua problem kamu yang start\n[00:18.30]Jangan minta rewind aku kamu udah finish"
+        )
+
+        #expect(!LRCParser.hasTimedLines(fakeSyncedLowerID.syncedLyrics))
+        #expect(LRCParser.hasTimedLines(realSyncedHigherID.syncedLyrics))
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [fakeSyncedLowerID, realSyncedHigherID]) == .matchedSynced(realSyncedHigherID))
+    }
+
+    @Test("Fake-synced candidate falls back cleanly to plain lyrics when no timed candidate exists")
+    func fakeSyncedFallsBackToPlainWhenAlone() {
+        let query = LyricsQueryTrack(
+            title: "Berubah",
+            artist: "Tenxi & Jemsii",
+            durationSeconds: 200.5
+        )
+        let fakeSyncedOnly = LRCLIBCandidate(
+            id: 24620315,
+            trackName: "Berubah",
+            artistName: "Tenxi, Jemsii",
+            durationSeconds: 201.0,
+            plainLyrics: nil,
+            syncedLyrics: "Jangan nyesel semua problem kamu yang start\nJangan minta rewind aku kamu udah finish"
+        )
+
+        #expect(LyricsMatcher.evaluateCandidates(query: query, candidates: [fakeSyncedOnly]) == .matchedPlain(fakeSyncedOnly))
+    }
+
     @Test("Monotonic request generation rejects stale A -> B -> A responses and revoked consent")
     func monotonicGenerationAndConsentGuard() {
         var tracker = LyricsRequestTracker()

@@ -45,6 +45,17 @@ public enum LRCParser {
         try parse(Data(text.utf8), byteLimit: byteLimit)
     }
 
+    /// Returns true only when `raw` parses as a valid `.timed` LRC payload containing at least one timed line.
+    public static func hasTimedLines(_ raw: String?) -> Bool {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        guard case .timed(let file)? = try? parse(raw) else {
+            return false
+        }
+        return !file.lines.isEmpty
+    }
+
     public static func parse(_ data: Data, byteLimit: Int = defaultByteLimit) throws -> LyricsParseOutcome {
         guard !data.isEmpty else { return .empty }
         guard data.count <= byteLimit else { throw LRCParseError.tooLarge(allowed: byteLimit, actual: data.count) }

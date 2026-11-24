@@ -441,8 +441,10 @@ public enum LyricsMatcher {
         var plausibleAmbiguous: [LRCLIBCandidate] = []
 
         for candidate in candidates {
-            let hasSynced = !(candidate.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let hasSynced = LRCParser.hasTimedLines(candidate.syncedLyrics)
+            let hasNonEmptySyncedField = !(candidate.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
             let hasPlain = !(candidate.plainLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                || (!hasSynced && hasNonEmptySyncedField)
             // Never let empty stub entries enter scoring or displace valid matches
             guard candidate.instrumental || hasSynced || hasPlain else { continue }
 
@@ -526,10 +528,12 @@ public enum LyricsMatcher {
             if chosen.instrumental {
                 return .matchedInstrumental(chosen)
             }
-            if let synced = chosen.syncedLyrics, !synced.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if LRCParser.hasTimedLines(chosen.syncedLyrics) {
                 return .matchedSynced(chosen)
             }
-            if let plain = chosen.plainLyrics, !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let hasPlainText = !(chosen.plainLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                || !(chosen.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            if hasPlainText {
                 return .matchedPlain(chosen)
             }
             return .notFound

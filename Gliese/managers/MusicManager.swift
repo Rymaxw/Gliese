@@ -277,7 +277,8 @@ class MusicManager: ObservableObject {
 
         }
 
-        let effectiveRate = state.isPlaying ? (state.playbackRate > 0 ? state.playbackRate : 1.0) : state.playbackRate
+        // Respect explicit playbackRate == 0 while playing (buffering/stalled) so PlaybackClock stays frozen until rate > 0.
+        let effectiveRate = state.isPlaying ? max(0.0, state.playbackRate) : 0.0
         let timeChanged = state.currentTime != self.elapsedTime
         let durationChanged = state.duration != self.songDuration
         let playbackRateChanged = effectiveRate != self.playbackRate
@@ -343,7 +344,7 @@ class MusicManager: ObservableObject {
 
         if shouldReanchorClock {
             let validDuration: Double? = state.duration > 0 ? state.duration : nil
-            if state.isPlaying {
+            if state.isPlaying && effectiveRate > 0 {
                 let anchorLatency = (state.lastUpdated == .distantPast)
                     ? 0.0
                     : max(0.0, Date().timeIntervalSince(state.lastUpdated))
@@ -356,11 +357,12 @@ class MusicManager: ObservableObject {
                     rate: effectiveRate
                 ))
             } else {
+                // Paused or buffering (effectiveRate == 0): anchor position without advancing.
                 let clamped = validDuration.map { min(max(0.0, state.currentTime), $0) } ?? max(0.0, state.currentTime)
                 playbackClock.apply(PlaybackSnapshot(
                     positionSeconds: clamped,
                     durationSeconds: validDuration,
-                    playing: false,
+                    playing: state.isPlaying,
                     rate: 0.0
                 ))
             }
@@ -597,7 +599,7 @@ class MusicManager: ObservableObject {
         let timeDifference = (isPlaying && timestampDate != .distantPast)
             ? max(0, date.timeIntervalSince(timestampDate))
             : 0
-        let effectiveRate = playbackRate > 0 ? playbackRate : 1.0
+        let effectiveRate = max(0.0, playbackRate)
         let estimated = max(0, elapsedTime + (timeDifference * effectiveRate))
         return songDuration > 0 ? min(estimated, songDuration) : estimated
     }

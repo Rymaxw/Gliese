@@ -164,6 +164,27 @@ final class GlieseLyricsManager: ObservableObject {
         }
     }
 
+    func applyGlobalOffset(_ seconds: Double) {
+        let clamped = min(
+            LyricsTimeline.maxGlobalOffsetSeconds,
+            max(LyricsTimeline.minGlobalOffsetSeconds, (seconds * 1000.0).rounded() / 1000.0)
+        )
+        if Defaults[.glieseGlobalLyricsOffsetSeconds] != clamped {
+            Defaults[.glieseGlobalLyricsOffsetSeconds] = clamped
+        }
+        guard case .synced(var timeline, let sourceLabel) = state else { return }
+        timeline.setGlobalOffset(clamped)
+        state = .synced(timeline, sourceLabel: sourceLabel)
+    }
+
+    func adjustGlobalOffset(by delta: Double) {
+        applyGlobalOffset(Defaults[.glieseGlobalLyricsOffsetSeconds] + delta)
+    }
+
+    func resetGlobalOffset() {
+        applyGlobalOffset(0.0)
+    }
+
     func pauseFollowForManualScroll() {
         guard case .synced(var timeline, let sourceLabel) = state, timeline.isFollowing else { return }
         timeline.pauseFollowForManualScroll()
@@ -300,7 +321,11 @@ final class GlieseLyricsManager: ObservableObject {
     }
 
     private func applyTimedLRC(_ lrcFile: LRCFile, sourceLabel: String, initialOffset: Double) {
-        let timeline = LyricsTimeline(file: lrcFile, userOffsetSeconds: initialOffset)
+        let timeline = LyricsTimeline(
+            file: lrcFile,
+            userOffsetSeconds: initialOffset,
+            globalOffsetSeconds: Defaults[.glieseGlobalLyricsOffsetSeconds]
+        )
         userOffsetSeconds = timeline.userOffsetSeconds
         isFollowing = timeline.isFollowing
         state = .synced(timeline, sourceLabel: sourceLabel)
@@ -548,7 +573,7 @@ final class GlieseLyricsManager: ObservableObject {
             plainLyrics: dto.plainLyrics,
             syncedLyrics: dto.syncedLyrics
         )
-        let hasSynced = !(candidate.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let hasSynced = LRCParser.hasTimedLines(candidate.syncedLyrics)
         let isPlainOnly = !candidate.instrumental && !hasSynced
         let isStalePlain: Bool
         if isPlainOnly {
@@ -943,44 +968,108 @@ struct GlieseLyricsDetailView: View {
                         }
                     }
 
-                    HStack(spacing: 6) {
-                        Text(sourceLabel)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(Color(white: 0.7))
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 5) {
+                            Text(sourceLabel)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Color(white: 0.7))
 
-                        Spacer(minLength: 0)
+                            Spacer(minLength: 0)
 
-                        Button(timeline.isFollowing ? "Pause Sync" : "Resume Sync") {
-                            if timeline.isFollowing {
-                                lyricsManager.pauseFollowForManualScroll()
-                            } else {
-                                lyricsManager.resumeFollow()
+                            Button(timeline.isFollowing ? "Pause Sync" : "Resume Sync") {
+                                if timeline.isFollowing {
+                                    lyricsManager.pauseFollowForManualScroll()
+                                } else {
+                                    lyricsManager.resumeFollow()
+                                }
                             }
+                            .buttonStyle(.borderless)
+                            .font(.system(size: 10.5, weight: .semibold))
                         }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 11, weight: .semibold))
 
-                        Button("-0.5s") {
-                            lyricsManager.adjustOffset(by: -0.5)
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .accessibilityLabel("Delay lyrics by 0.5 seconds")
+                        HStack(spacing: 5) {
+                            Text("Track")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Color(white: 0.6))
+                            Spacer(minLength: 0)
 
-                        Button(String(format: "%+.1fs", timeline.userOffsetSeconds)) {
-                            lyricsManager.resetOffset()
-                        }
-                        .font(.system(size: 11, design: .monospaced))
-                        .accessibilityLabel("Reset lyric timing offset")
+                            Button("-0.5") { lyricsManager.adjustOffset(by: -0.5) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Delay track lyrics by 0.5s (later)")
+                                .accessibilityLabel("Delay track lyrics by 0.5 seconds")
 
-                        Button("+0.5s") {
-                            lyricsManager.adjustOffset(by: 0.5)
+                            Button("-0.1") { lyricsManager.adjustOffset(by: -0.1) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Delay track lyrics by 0.1s (later)")
+                                .accessibilityLabel("Delay track lyrics by 0.1 seconds")
+
+                            Button(String(format: "%+.1fs", timeline.userOffsetSeconds)) {
+                                lyricsManager.resetOffset()
+                            }
+                            .font(.system(size: 10, design: .monospaced))
+                            .help("Click to reset track offset to 0.0s")
+                            .accessibilityLabel("Reset track lyric timing offset")
+
+                            Button("+0.1") { lyricsManager.adjustOffset(by: 0.1) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Advance track lyrics by 0.1s (earlier)")
+                                .accessibilityLabel("Advance track lyrics by 0.1 seconds")
+
+                            Button("+0.5") { lyricsManager.adjustOffset(by: 0.5) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Advance track lyrics by 0.5s (earlier)")
+                                .accessibilityLabel("Advance track lyrics by 0.5 seconds")
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .accessibilityLabel("Advance lyrics by 0.5 seconds")
+
+                        HStack(spacing: 5) {
+                            Text("Global")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Color(white: 0.6))
+                            Spacer(minLength: 0)
+
+                            Button("-0.5") { lyricsManager.adjustGlobalOffset(by: -0.5) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Delay all lyrics by 0.5s (later)")
+                                .accessibilityLabel("Delay all lyrics by 0.5 seconds")
+
+                            Button("-0.1") { lyricsManager.adjustGlobalOffset(by: -0.1) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Delay all lyrics by 0.1s (later)")
+                                .accessibilityLabel("Delay all lyrics by 0.1 seconds")
+
+                            Button(String(format: "%+.1fs", timeline.globalOffsetSeconds)) {
+                                lyricsManager.resetGlobalOffset()
+                            }
+                            .font(.system(size: 10, design: .monospaced))
+                            .help("Click to reset global lyrics offset to 0.0s")
+                            .accessibilityLabel("Reset global lyric timing offset")
+
+                            Button("+0.1") { lyricsManager.adjustGlobalOffset(by: 0.1) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Advance all lyrics by 0.1s (earlier)")
+                                .accessibilityLabel("Advance all lyrics by 0.1 seconds")
+
+                            Button("+0.5") { lyricsManager.adjustGlobalOffset(by: 0.5) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .help("Advance all lyrics by 0.5s (earlier)")
+                                .accessibilityLabel("Advance all lyrics by 0.5 seconds")
+                        }
                     }
                 }
             }

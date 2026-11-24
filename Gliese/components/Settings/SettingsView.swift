@@ -560,6 +560,7 @@ struct Media: View {
 
     @Default(.enableLyrics) var enableLyrics
     @Default(.glieseAllowOnlineLyrics) var allowOnlineLyrics
+    @Default(.glieseGlobalLyricsOffsetSeconds) var globalLyricsOffsetSeconds
 
     var body: some View {
         Form {
@@ -647,6 +648,27 @@ struct Media: View {
                 }
                 .onChange(of: allowOnlineLyrics) { _, _ in
                     GlieseLyricsManager.shared.reloadCurrentTrack()
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Global lyrics sync offset")
+                        Spacer()
+                        Text(String(format: "%+.1fs", globalLyricsOffsetSeconds))
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Stepper("", value: $globalLyricsOffsetSeconds, in: -5.0...5.0, step: 0.1)
+                            .labelsHidden()
+                        Button("Reset") {
+                            GlieseLyricsManager.shared.resetGlobalOffset()
+                        }
+                        .disabled(abs(globalLyricsOffsetSeconds) < 0.001)
+                    }
+                    Text("Negative delays lyrics (if too early); positive advances lyrics (if too late). Combines with per-track offset.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .onChange(of: globalLyricsOffsetSeconds) { _, newValue in
+                    GlieseLyricsManager.shared.applyGlobalOffset(newValue)
                 }
                 HStack {
                     Text("Local .lrc folder")

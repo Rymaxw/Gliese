@@ -141,4 +141,37 @@ struct LyricsTimelineTests {
         timeline.resumeFollow()
         #expect(timeline.isFollowing)
     }
+
+    @Test("global offset combines cleanly with per-track and file offsets with exact sign semantics")
+    func globalAndPerTrackOffsetDirection() throws {
+        // Raw line at 15.10s
+        let file = try makeFile("[00:15.10] Jangan nyesel")
+        var timeline = LyricsTimeline(file: file, userOffsetSeconds: 0.0, globalOffsetSeconds: -0.5)
+
+        // Negative global offset (-0.5s) DELAYS lyrics: effective timestamp = 15.10 - (-0.5) = 15.60s
+        #expect(timeline.activeLine(at: 15.59) == nil)
+        #expect(abs((timeline.activeLine(at: 15.60)?.effectiveTimestamp ?? -1) - 15.60) < 0.0001)
+
+        // Adding negative per-track offset (-0.2s) delays further to 15.80s
+        timeline.stepUserOffset(by: -0.2)
+        #expect(timeline.activeLine(at: 15.79) == nil)
+        #expect(abs((timeline.activeLine(at: 15.80)?.effectiveTimestamp ?? -1) - 15.80) < 0.0001)
+
+        // Resetting per-track offset preserves global offset (-0.5s -> 15.60s)
+        timeline.resetUserOffset()
+        #expect(timeline.userOffsetSeconds == 0.0)
+        #expect(timeline.globalOffsetSeconds == -0.5)
+        #expect(abs((timeline.activeLine(at: 15.60)?.effectiveTimestamp ?? -1) - 15.60) < 0.0001)
+
+        // Positive global offset (+0.5s) ADVANCES lyrics: effective timestamp = 15.10 - 0.5 = 14.60s
+        timeline.setGlobalOffset(0.5)
+        #expect(timeline.activeLine(at: 14.59) == nil)
+        #expect(abs((timeline.activeLine(at: 14.60)?.effectiveTimestamp ?? -1) - 14.60) < 0.0001)
+
+        // Global offset clamps strictly to [-5.0, +5.0]
+        timeline.setGlobalOffset(-12.0)
+        #expect(timeline.globalOffsetSeconds == -5.0)
+        timeline.setGlobalOffset(9.0)
+        #expect(timeline.globalOffsetSeconds == 5.0)
+    }
 }
